@@ -50,48 +50,42 @@ def Goal.target {n : Nat} : Goal n → CMvPolynomial n ℚ
   | .strict p ε _ => p - CMvPolynomial.C ε
   | .infeasible   => -1
 
-/-- A Putinar-style Positivstellensatz certificate. The `sigmas` list pairs
-each constraint polynomial `gᵢ` with its SOS multiplier `σᵢ`. -/
+/-- A Putinar-style Positivstellensatz certificate. The list `sigmas`
+provides one SOS multiplier per constraint, paired by position with
+the externally-supplied constraint list `gs`. -/
 structure Certificate (n : Nat) where
   sigma0 : SOSDecomp n
-  sigmas : List (SOSDecomp n × CMvPolynomial n ℚ)
+  sigmas : List (SOSDecomp n)
   deriving Inhabited
 
-/-- The full polynomial expansion `σ₀ + Σᵢ σᵢ · gᵢ` of a certificate. -/
-def Certificate.toPoly {n : Nat} (c : Certificate n) : CMvPolynomial n ℚ :=
-  c.sigma0.toPoly +
-  c.sigmas.foldr (fun pair acc => acc + pair.fst.toPoly * pair.snd) 0
+/-- Sum of `σᵢ.toPoly * gᵢ` over paired lists. -/
+def Certificate.constraintSum {n : Nat}
+    (sigmas : List (SOSDecomp n)) (gs : List (CMvPolynomial n ℚ)) :
+    CMvPolynomial n ℚ :=
+  (sigmas.zip gs).foldr (fun pair acc => acc + pair.fst.toPoly * pair.snd) 0
 
-/-- Certificate validity check. We rely on CompPoly's `Lawful.instDecidableEq`
-(automatic for `ℚ` coefficients) to make polynomial equality decidable
-and `cbv_decide`-friendly. -/
+/-- The full polynomial expansion `σ₀ + Σᵢ σᵢ · gᵢ` of a certificate
+evaluated against constraints `gs`. -/
+def Certificate.toPoly {n : Nat} (c : Certificate n)
+    (gs : List (CMvPolynomial n ℚ)) : CMvPolynomial n ℚ :=
+  c.sigma0.toPoly + Certificate.constraintSum c.sigmas gs
+
+/-- Certificate validity check. We rely on CompPoly's
+`Lawful.instDecidableEq` (automatic for `ℚ` coefficients) to make
+polynomial equality decidable and `cbv_decide`-friendly. -/
 def Certificate.checks {n : Nat} (c : Certificate n) (goal : Goal n)
     (gs : List (CMvPolynomial n ℚ)) : Bool :=
-  -- The constraint list provided externally must match the certificate's σᵢ list.
   (c.sigmas.length == gs.length) &&
-  (c.sigmas.zip gs).all (fun pair => pair.fst.snd == pair.snd) &&
-  -- And the polynomial identity must hold exactly.
-  decide (goal.target = c.toPoly)
+  decide (goal.target = c.toPoly gs)
 
 /-- Bridge lemma: `checks goal gs = true` is equivalent to the polynomial
-identity `goal.target = c.toPoly` together with the constraint-list match. -/
+identity `goal.target = c.toPoly gs` together with the length match. -/
 theorem Certificate.checks_iff {n : Nat} (c : Certificate n) (goal : Goal n)
     (gs : List (CMvPolynomial n ℚ)) :
     c.checks goal gs = true ↔
       c.sigmas.length = gs.length ∧
-      (∀ pair ∈ c.sigmas.zip gs, pair.fst.snd = pair.snd) ∧
-      goal.target = c.toPoly := by
+      goal.target = c.toPoly gs := by
   unfold Certificate.checks
-  simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq, List.all_eq_true]
-  constructor
-  · rintro ⟨⟨hlen, hpairs⟩, hid⟩
-    refine ⟨hlen, ?_, hid⟩
-    intro pair hpair
-    have := hpairs pair hpair
-    simpa using this
-  · rintro ⟨hlen, hpairs, hid⟩
-    refine ⟨⟨hlen, ?_⟩, hid⟩
-    intro pair hpair
-    simpa using hpairs pair hpair
+  simp [decide_eq_true_eq]
 
 end Sos
