@@ -90,4 +90,38 @@ def evalReal {n : Nat} (φ : Fin n → ℝ) : Sos.Poly n → ℝ
   | .mul p q   => evalReal φ p * evalReal φ q
   | .pow p k   => evalReal φ p ^ k
 
+/-- Lift a `Fin n → ℝ` valuation to a `Nat → ℝ` valuation by extending
+with zero on out-of-bound indices. The reifier produces proofs against
+`Raw.eval` with a `Nat`-indexed valuation; this is the canonical
+extension that lines up with `Poly.evalReal` after casting. -/
+def naturalValuation {n : Nat} (φ : Fin n → ℝ) (i : Nat) : ℝ :=
+  if h : i < n then φ ⟨i, h⟩ else 0
+
+/-- The crucial reflection theorem: `Raw.eval` under the natural
+valuation matches `Poly.evalReal` after casting to the typed form.
+Proof is structural induction on `r`; both sides reduce in lockstep. -/
+theorem Raw.eval_cast {n : Nat} (r : Raw) (h : r.maxAtomBound ≤ n) (φ : Fin n → ℝ) :
+    r.eval (naturalValuation φ) = (r.cast n h).evalReal φ := by
+  induction r with
+  | const r => rfl
+  | var i =>
+    simp only [Raw.eval, Raw.cast, evalReal, naturalValuation]
+    have hi : i < n := by simp [maxAtomBound] at h; omega
+    simp [hi]
+  | neg p ih =>
+    simp only [Raw.eval, Raw.cast, evalReal]
+    rw [ih]
+  | add p q ihp ihq =>
+    simp only [Raw.eval, Raw.cast, evalReal]
+    rw [ihp, ihq]
+  | sub p q ihp ihq =>
+    simp only [Raw.eval, Raw.cast, evalReal]
+    rw [ihp, ihq]
+  | mul p q ihp ihq =>
+    simp only [Raw.eval, Raw.cast, evalReal]
+    rw [ihp, ihq]
+  | pow p k ih =>
+    simp only [Raw.eval, Raw.cast, evalReal]
+    rw [ih]
+
 end Sos.Poly
