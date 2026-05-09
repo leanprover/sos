@@ -76,6 +76,10 @@ def monomialsUpTo (n : Nat) (d : Nat) : Array (CMvMonomial n) :=
 /-- Half-ceiling: `⌈d/2⌉`. -/
 @[inline] def halfCeil (d : Nat) : Nat := (d + 1) / 2
 
+/-- Default monomial: `Vector ℕ n` of all zeros. -/
+@[inline] def zeroMono (n : Nat) : CMvMonomial n :=
+  ⟨Array.replicate n 0, by simp⟩
+
 /-- The basis-degree bound for σᵢ given target degree and gᵢ degree. -/
 @[inline] def multiplierBasisDeg (targetDeg : Nat) (gDeg : Nat) : Nat :=
   if targetDeg < gDeg then 0 else halfCeil (targetDeg - gDeg)
@@ -102,9 +106,17 @@ def buildBlocks (target : CMvPolynomial n ℚ)
   let targetDeg := target.totalDegree
   let mut blocks : Array (BlockSpec n) := #[]
   -- Block 0: σ₀.
-  blocks := blocks.push
-    { basis := monomialsUpTo n (halfCeil targetDeg)
-      multiplier := CMvPolynomial.C 1 }
+  -- Heuristic: drop the constant monomial from the σ₀ basis when the
+  -- target has no constant term. The corresponding `M[0][0]` would be
+  -- forced to zero, leaving CSDP's interior-point step on the boundary
+  -- of PSD and stalling its line search. The remaining basis still
+  -- spans the target's Newton polytope.
+  let σ₀Basis := monomialsUpTo n (halfCeil targetDeg)
+  let σ₀Basis :=
+    if target.coeff (zeroMono n) = 0 then
+      σ₀Basis.filter (fun m => m ≠ zeroMono n)
+    else σ₀Basis
+  blocks := blocks.push { basis := σ₀Basis, multiplier := CMvPolynomial.C 1 }
   -- Blocks 1..m: σᵢ for each gᵢ.
   for g in gs do
     let gDeg := g.totalDegree
@@ -121,11 +133,6 @@ def buildBlocks (target : CMvPolynomial n ℚ)
   Float.ofInt q.num / Float.ofInt q.den
 
 /-! ### Polynomial product accessors -/
-
-/-- Default monomial: `Vector ℕ n` of all zeros. Used so `Array.get!`-style
-indexing on a monomial array typechecks. -/
-private def zeroMono (n : Nat) : CMvMonomial n :=
-  ⟨Array.replicate n 0, by simp⟩
 
 instance : Inhabited (CMvMonomial n) := ⟨zeroMono n⟩
 
