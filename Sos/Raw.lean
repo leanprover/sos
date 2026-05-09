@@ -54,7 +54,7 @@ inductive Poly (n : Nat) where
   | sub   : Poly n → Poly n → Poly n
   | mul   : Poly n → Poly n → Poly n
   | pow   : Poly n → Nat → Poly n
-  deriving Inhabited, Repr
+  deriving Inhabited, Repr, DecidableEq
 
 end Sos
 

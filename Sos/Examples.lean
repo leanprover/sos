@@ -52,4 +52,28 @@ example
   exact sos_sound smokeTarget [] cert hcheck φ
     (fun g hg => by simp [List.not_mem_nil] at hg)
 
+/-! ### Round-trip test: `Sos.Poly` ToExpr is faithful.
+
+The pipeline that consumes a search-produced certificate eventually
+quotes it back as a Lean expression via the `ToExpr (Sos.Poly n)`
+instance. The test below builds a fixed `Sos.Poly 2`, ToExpr-quotes
+it, evaluates the resulting expression back in `MetaM`, and
+confirms it round-trips definitionally.
+-/
+
+-- Round-trip Sos.Poly through ToExpr / Meta.evalExpr.
+run_meta do
+  let p : Sos.Poly 2 :=
+    Sos.Poly.add
+      (Sos.Poly.mul (Sos.Poly.var ⟨0, by decide⟩) (Sos.Poly.var ⟨0, by decide⟩))
+      (Sos.Poly.add
+        (Sos.Poly.mul (Sos.Poly.var ⟨1, by decide⟩) (Sos.Poly.const 3))
+        (Sos.Poly.const (-2 : Rat)))
+  let typeE := Lean.mkApp (Lean.Expr.const ``Sos.Poly []) (Lean.mkNatLit 2)
+  let e := Sos.Poly.toExprImpl p
+  let p' ← Lean.Meta.evalExpr (Sos.Poly 2) typeE e
+  unless decide (p = p') do
+    throwError "Sos.Poly ToExpr round-trip failed"
+  IO.println "✓ Sos.Poly ToExpr round-trip ok"
+
 def main : IO Unit := runSmoke
