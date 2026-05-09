@@ -6,44 +6,51 @@ Harrison's sum-of-squares decision procedure for nonlinear real
 arithmetic, in Lean 4. Based on the design from
 [Harrison 2007 (TPHOLs)](https://link.springer.com/chapter/10.1007/978-3-540-74591-4_9).
 
-## Status — v0.1
+## Status
 
-**Verifier core (complete, no holes):**
+The `by sos` tactic closes nonlinear-real-arithmetic goals end-to-end:
+reify the goal, encode an SDP feasibility problem, call CSDP, round
+the float Gram matrix to rationals, decompose via LDLᵀ + Lagrange
+four-square, and dispatch the right verifier-soundness lemma. The
+following compile via `by sos`:
 
-- `Sos.sos_sound`: a validated SOS certificate proves `p ≥ 0` over a
-  Putinar-form constraint set.
-- `Sos.sos_strict_sound`, `Sos.sos_infeasible_sound`: analogues for
-  `p > 0` and infeasibility refutation.
-- Soundness factors through `IsSumSq.nonneg` (Mathlib) plus the
-  `aeval` ring-hom structure on CompPoly's `CMvPolynomial n ℚ`.
+```lean
+import Sos
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
+example : ∀ x : Fin 1 → ℝ, 0 < (x 0)^2 + 1 := by sos
+example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by sos
+```
 
-**Search engine (end-to-end working):**
+For multivariate / rank-deficient targets — those whose Putinar
+certificate has its Gram matrix on the boundary of the PSD cone —
+CSDP's interior-point step does not converge; the verifier still
+accepts an externally-provided certificate via `by sos_witness <cert>`:
 
-- `Sos.Search.runSearch goal gs : IO (Option (Certificate n))` builds
-  a Putinar-form SDP from `(goal, gs)`, invokes
-  [CSDP](https://github.com/coin-or/Csdp) via
-  [`kim-em/lean-csdp`](https://github.com/kim-em/lean-csdp), rounds
-  the float Gram matrices over a denominator schedule, reconstructs
-  explicit polynomial squares via rational LDLᵀ and Lagrange
-  four-square decomposition, and checks the resulting `Certificate`
-  exactly via `Lawful.instDecidableEq` polynomial equality.
-- v0.1 supports closed positivity (`Goal.closed p`) and infeasibility
-  (`Goal.infeasible`). Strict positivity (`Goal.strict p ε hε`) is
-  scaffolded but the SDP slack-maximisation encoding is deferred to
-  v0.2.
+```lean
+def handCert_perfect_square : Sos.Certificate 2 :=
+  { sigma0 := { squares := [CMvPolynomial.X 0 + CMvPolynomial.X 1] },
+    sigmas := [] }
 
-**User-facing tactic surface (deferred to v0.2):**
+example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by
+  sos_witness handCert_perfect_square
+```
 
-- `by sos` and `by sos_witness <cert>` are declared at the syntax
-  level but their elaborators raise an explanatory error in v0.1.
-- v0.2 will add a `Lean.ToExpr (Certificate n)` instance plus the
-  `simp`-driven goal rewrite needed to bridge from `0 ≤ <expr>` to
-  `0 ≤ aeval x p_reified`.
+The Motzkin polynomial `x⁴y² + x²y⁴ + 1 - 3x²y²` is non-negative but
+not SOS; `by sos` correctly fails to find a certificate (caught here
+by `fail_if_success`):
 
-For now, users can apply `Sos.sos_sound` (or its strict /
-infeasibility variants) directly with a hand-constructed
-`Certificate`, or invoke `Sos.Search.runSearch` programmatically (as
-in `Sos/Examples.lean`).
+```lean
+example : True := by
+  fail_if_success
+    (have : ∀ x : Fin 2 → ℝ,
+        0 ≤ (x 0)^4 * (x 1)^2 + (x 0)^2 * (x 1)^4 + 1
+            - 3*(x 0)^2*(x 1)^2 := by sos)
+  trivial
+```
+
+The library is sorry-free and axiom-free. Soundness factors through
+`IsSumSq.nonneg` (Mathlib) and the `aeval` ring-hom structure on
+CompPoly's `CMvPolynomial n ℚ`.
 
 ## Smoke test
 
@@ -67,28 +74,25 @@ Relative dual infeasibility: 5.00e-11
 ✓ cert.checks smokeGoal [] = true
 ```
 
-This demonstrates the full pipeline: SDP encoding from a CompPoly
-polynomial, CSDP invocation, rational rounding, LDL reconstruction,
-and certificate validation.
-
 ## Architecture
 
 ```
-goal expression  ── Sos.Reify.parseGoal ──▶  (Sos.Goal n, gs : List (CMvPolynomial n ℚ))
+goal expression  ── Sos.Reify.parseGoalFull ──▶  ParsedGoal
                                                        │
                                                        ▼
-                                               Sos.Search.runSearch
+                                              Sos.Search.runSearch
                                                        │
-                                                       │   builds SDP, calls CSDP,
-                                                       │   rounds rationals, runs LDL,
-                                                       │   verifies certificate
+                                                       │  builds SDP, calls CSDP,
+                                                       │  rounds rationals, runs LDL,
+                                                       │  reconstructs squares
                                                        │
                                                        ▼
                                               Sos.Certificate n  (validated)
                                                        │
                                                        ▼
-                                          Sos.sos_sound / sos_strict_sound /
-                                              sos_infeasible_sound
+                                          Sos.Tactic.closeClosedSos /
+                                          closeStrictSos /
+                                          closeInfeasibleSos
                                                        │
                                                        ▼
                                                 ℝ-level proof
@@ -98,19 +102,20 @@ goal expression  ── Sos.Reify.parseGoal ──▶  (Sos.Goal n, gs : List (C
 |---|---|
 | `Sos.Atoms` | Atom-table type for the reifier. |
 | `Sos.Raw` | `Poly.Raw` and typed `Poly n` ASTs + reflection theorem. |
-| `Sos.Certificate` | `Goal n`, `SOSDecomp`, `Certificate n`, `checks` predicate via `Lawful.instDecidableEq`. |
-| `Sos.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound` (proved). |
+| `Sos.Certificate` | `Goal n`, `SOSDecomp`, `Certificate n`, `checks` predicate. |
+| `Sos.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound`, plus `aeval_*` and `evalReal_eq_aeval` bridge lemmas. |
 | `Sos.LDL` | Rational LDLᵀ, Lagrange 4-square, Gram→SOS reconstruction. |
-| `Sos.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop. |
-| `Sos.Reify` | Lean-`Expr` walker → `(Goal n, gs)`. |
-| `Sos.Tactic` | `sos` / `sos_witness` syntax (v0.1 stubs). |
-| `Sos.Examples` | Worked smoke test invoking the full pipeline. |
+| `Sos.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop, ε-schedule for strict positivity. |
+| `Sos.Reify` | Lean-`Expr` walker → `ParsedGoal` (typed AST + abstracted-over-`x` original Expr per polynomial). |
+| `Sos.Tactic` | `by sos` (search-driven) and `by sos_witness <cert>` elaborators. |
+| `Sos.Examples` | Worked examples invoking the tactic. |
+| `Sos.Smoke` | Programmatic smoke test built as the `sos-example` lean_exe. |
 
 ## Dependencies
 
 | Package | Purpose |
 |---|---|
-| [`leanprover-community/mathlib4`](https://github.com/leanprover-community/mathlib4) | `IsSumSq.nonneg`, `ℝ`, `algebraMap ℚ ℝ`. |
+| [`leanprover-community/mathlib4`](https://github.com/leanprover-community/mathlib4) | `IsSumSq.nonneg`, `ℝ`, `algebraMap ℚ ℝ`, `ring`, `push_cast`. |
 | [`Verified-zkEVM/CompPoly`](https://github.com/Verified-zkEVM/CompPoly) | Computational `CMvPolynomial n R` substrate; sorry/axiom-free. |
 | [`kim-em/lean-csdp`](https://github.com/kim-em/lean-csdp) | FFI wrapper around CSDP 6.2.0. Vendored CSDP source. |
 
@@ -122,16 +127,7 @@ System dependencies (BLAS/LAPACK, transitively via lean-csdp):
 | macOS    | Apple Command Line Tools (Accelerate framework) |
 | Windows  | MSYS2 mingw-w64 with `mingw-w64-x86_64-openblas` |
 
-CI runs Linux-only for v0.1. macOS / Windows are deferred to v0.2.
-
-## Roadmap to v0.2
-
-In order of priority:
-
-1. `Lean.ToExpr (Certificate n)` instance + `by sos` / `by sos_witness <cert>` elaborators.
-2. Strict-positivity SDP encoding (LP-slack-maximisation block).
-3. macOS + Windows CI (mirror lean-csdp's per-platform setup).
-4. Richer goal language: `1/x`-style preprocessing, Mathlib `Polynomial`-typed goals.
+CI runs Linux-only.
 
 ## Out of scope (intentionally)
 
