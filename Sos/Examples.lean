@@ -76,4 +76,16 @@ run_meta do
     throwError "Sos.Poly ToExpr round-trip failed"
   IO.println "✓ Sos.Poly ToExpr round-trip ok"
 
+-- Round-trip CMvPolynomial → Sos.Poly → CMvPolynomial via decompile + toCMv.
+run_meta do
+  -- p = 3*x0² + 2*x0*x1 + 5
+  let x0 : CMvPolynomial 2 ℚ := CMvPolynomial.X 0
+  let x1 : CMvPolynomial 2 ℚ := CMvPolynomial.X 1
+  let p : CMvPolynomial 2 ℚ :=
+    CMvPolynomial.C 3 * x0 * x0 + CMvPolynomial.C 2 * x0 * x1 + CMvPolynomial.C 5
+  let q := (Sos.Poly.decompile p).toCMv
+  unless decide (p = q) do
+    throwError "Sos.Poly.decompile round-trip failed"
+  IO.println "✓ Sos.Poly.decompile round-trip ok"
+
 def main : IO Unit := runSmoke
