@@ -72,7 +72,24 @@ def runProbeConstrained : IO Unit := do
     let t1 ← IO.monoMsNow
     IO.println s!"✗ ({t1 - t0} ms) no cert"
 
+def runProbeInfeasible : IO Unit := do
+  IO.println "=== probe: ¬ ((x 0)² + 1 ≤ 0) (infeasibility) ==="
+  -- gs = [-(X 0)² - 1] (the reified `(x 0)² + 1 ≤ 0` constraint).
+  let x0 : CMvPolynomial 1 ℚ := CMvPolynomial.X 0
+  let g0 : CMvPolynomial 1 ℚ := -(x0 * x0) - CMvPolynomial.C 1
+  let goal : Goal 1 := .infeasible
+  let t0 ← IO.monoMsNow
+  match (← Sos.Search.runSearch goal [g0]) with
+  | some cert =>
+    let t1 ← IO.monoMsNow
+    IO.println s!"✓ ({t1 - t0} ms) cert: {cert.sigma0.squares.length} σ₀-squares, \
+      {cert.sigmas.length} σᵢ blocks; checks = {cert.checks goal [g0]}"
+  | none =>
+    let t1 ← IO.monoMsNow
+    IO.println s!"✗ ({t1 - t0} ms) no cert"
+
 def main : IO Unit := do
   runSmoke
   runProbePerfectSquare
   runProbeConstrained
+  runProbeInfeasible

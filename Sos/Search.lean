@@ -175,8 +175,19 @@ def constraintMonomials (target : CMvPolynomial n ℚ)
 
 /-! ### CSDP problem construction -/
 
-/-- Build the SDP feasibility problem for `target ≥ 0` over `gs`. -/
-def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
+/-- Build the SDP feasibility problem for `target ≥ 0` over `gs`.
+
+`useTraceCost = true` populates the cost matrix `C` with the
+identity on every block (CSDP minimises `tr(X)`). This is Harrison's
+HOL Light convention and is required to make CSDP converge on
+near-rank-deficient SDPs (closed positivity / strict positivity).
+For infeasibility certificates the trace objective interacts badly
+with CSDP's homogeneous self-dual embedding (CSDP declares "dual
+infeasible" on what is otherwise a feasible problem); pass
+`useTraceCost = false` for that case to keep `C = 0` (pure
+feasibility). -/
+def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
+    (useTraceCost : Bool := true) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) :=
   let blocks := buildBlocks target gs
   let monos := constraintMonomials target blocks
@@ -218,17 +229,19 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
   -- Light SOS reports that an arbitrary objective improves rounding
   -- behaviour and may change CSDP's stopping criterion. This is an
   -- empirical knob, not a principled cure for boundary feasibility.
-  let cTriples : Array LeanCsdp.Triple := Id.run do
-    let mut acc : Array LeanCsdp.Triple := #[]
-    for blockIdx in [0:blocks.size] do
-      let block := blocks[blockIdx]!
-      for j in [0:block.size] do
-        acc := acc.push
-          { block := UInt32.ofNat (blockIdx + 1)
-            row   := UInt32.ofNat (j + 1)
-            col   := UInt32.ofNat (j + 1)
-            value := 1.0 }
-    return acc
+  let cTriples : Array LeanCsdp.Triple :=
+    if useTraceCost then Id.run do
+      let mut acc : Array LeanCsdp.Triple := #[]
+      for blockIdx in [0:blocks.size] do
+        let block := blocks[blockIdx]!
+        for j in [0:block.size] do
+          acc := acc.push
+            { block := UInt32.ofNat (blockIdx + 1)
+              row   := UInt32.ofNat (j + 1)
+              col   := UInt32.ofNat (j + 1)
+              value := 1.0 }
+      return acc
+    else #[]
   let problem : LeanCsdp.Problem :=
     { blockSizes := blockSizes
       b := b
@@ -333,7 +346,14 @@ proving `target = σ₀ + Σᵢ σᵢ · gᵢ` for the chosen `target`. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (goal : Goal n) :
     IO (Option (Certificate n)) := do
-  let (problem, blocks, _monos) := buildSdp target gs
+  -- Trace cost helps CSDP converge on rank-deficient closed/strict
+  -- problems but breaks the infeasibility encoding (CSDP declares
+  -- dual infeasibility on what is otherwise feasible). Disable it
+  -- for `.infeasible` goals.
+  let useTraceCost := match goal with
+    | .infeasible => false
+    | _ => true
+  let (problem, blocks, _monos) := buildSdp target gs useTraceCost
   if problem.b.size = 0 then
     -- No constraints (degenerate). Trivial cert if target = 0; otherwise no cert.
     if target = 0 then

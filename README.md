@@ -9,35 +9,24 @@ arithmetic, in Lean 4. Based on the design from
 ## Status
 
 The `by sos` tactic closes nonlinear-real-arithmetic goals end-to-end:
-reify the goal, encode an SDP feasibility problem, call CSDP, round
-the float Gram matrix to rationals, decompose via LDLᵀ + Lagrange
-four-square, and dispatch the right verifier-soundness lemma. The
-following compile via `by sos`:
+reify the goal, encode an SDP, call CSDP, round the float Gram matrix
+to rationals, decompose via LDLᵀ + Lagrange four-square, and dispatch
+the matching verifier-soundness lemma. All five end-state goals
+close automatically:
 
 ```lean
 import Sos
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
+example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by sos
 example : ∀ x : Fin 1 → ℝ, 0 < (x 0)^2 + 1 := by sos
 example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by sos
-```
-
-For multivariate / rank-deficient targets — those whose Putinar
-certificate has its Gram matrix on the boundary of the PSD cone —
-CSDP's interior-point step does not converge; the verifier still
-accepts an externally-provided certificate via `by sos_witness <cert>`:
-
-```lean
-def handCert_perfect_square : Sos.Certificate 2 :=
-  { sigma0 := { squares := [CMvPolynomial.X 0 + CMvPolynomial.X 1] },
-    sigmas := [] }
-
-example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by
-  sos_witness handCert_perfect_square
+example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^2 - x 0 + 1/4 := by sos
 ```
 
 The Motzkin polynomial `x⁴y² + x²y⁴ + 1 - 3x²y²` is non-negative but
-not SOS; `by sos` correctly fails to find a certificate (caught here
-by `fail_if_success`):
+not a sum of squares (Hilbert 1888 / Motzkin 1967); `by sos`
+correctly fails to find a certificate, caught here by
+`fail_if_success`:
 
 ```lean
 example : True := by
@@ -48,9 +37,23 @@ example : True := by
   trivial
 ```
 
+`by sos_witness <cert>` is also available for cases where the user
+wants to supply a hand-built certificate directly.
+
 The library is sorry-free and axiom-free. Soundness factors through
 `IsSumSq.nonneg` (Mathlib) and the `aeval` ring-hom structure on
-CompPoly's `CMvPolynomial n ℚ`.
+CompPoly's `CMvPolynomial n ℚ`. Two design points worth flagging,
+both following Harrison's [TPHOLs 2007 paper]
+(https://link.springer.com/chapter/10.1007/978-3-540-74591-4_9):
+
+- **`min tr(X)` cost matrix.** CSDP's interior-point step has no
+  preferred direction on a singleton boundary feasible set, so we
+  give it the trace objective Harrison reports works empirically.
+- **Zero-pivot LDLᵀ.** Rank-deficient SOS Grams (`(x + y)²` has
+  Gram `[[1,1],[1,1]]`, rank 1) require the "completing the square"
+  routine to accept a zero pivot when the residual column is also
+  zero. Our `Sos.LDL.decompose` does this; `LDL.reconstruct` already
+  drops the zero-D contributions.
 
 ## Smoke test
 
