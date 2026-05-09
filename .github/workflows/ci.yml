@@ -44,8 +44,8 @@ jobs:
       - name: Fetch Mathlib cache
         run: lake exe cache get
 
-      - name: Build Sos library + example exe
-        run: lake build Sos sos-example
+      - name: Build Sos library + Examples + smoke exe
+        run: lake build Sos Sos.Examples sos-example
 
       - name: Run end-to-end smoke test
         run: |
