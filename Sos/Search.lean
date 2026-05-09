@@ -42,6 +42,7 @@ file's header but not yet implemented.
 -/
 import Sos.Certificate
 import Sos.LDL
+import LeanCsdp
 
 namespace Sos.Search
 
