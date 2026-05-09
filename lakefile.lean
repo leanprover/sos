@@ -35,5 +35,5 @@ lean_lib Sos where
   moreLinkArgs := blasLapackLinkArgs
 
 lean_exe «sos-example» where
-  root := `Sos.Examples
+  root := `Sos.Smoke
   moreLinkArgs := blasLapackLinkArgs
