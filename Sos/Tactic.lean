@@ -90,7 +90,12 @@ private def buildBridgeEq (n : Nat) (xE : Expr) (p : Sos.Poly n)
     (origExpr : Expr) : TacticM Expr := do
   let lhs ← evalRealExpr n xE p
   let eqType ← mkEq lhs origExpr
-  let tac ← `(tactic| (simp only [Sos.Poly.evalReal, Fin.isValue]; push_cast; ring))
+  -- `simp only [evalReal]` may close the goal by `rfl` for very simple
+  -- polynomials (e.g. a single variable). Wrap the cast/ring step in
+  -- `all_goals` so it's a no-op when the goal is already done.
+  let tac ← `(tactic|
+    (simp only [Sos.Poly.evalReal, Fin.isValue]
+     all_goals (push_cast; ring)))
   proveByTactic eqType tac
 
 /-! ### Closed-positivity proof builder -/
@@ -127,7 +132,9 @@ private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (Sos.Poly n))
     let gCMv ← toCMvExpr n g
     let newList ← mkAppOptM ``List.cons #[some cmvTy, some gCMv, some accList]
     let pair ← mkAppM ``And.intro #[hP, accProof]
-    accProof ← mkAppM ``Iff.mpr #[← mkAppM ``List.forall_mem_cons #[], pair]
+    let iff ← mkAppOptM ``List.forall_mem_cons
+      #[some cmvTy, some predicate, some gCMv, some accList]
+    accProof ← mkAppM ``Iff.mpr #[iff, pair]
     accList := newList
   return accProof
 
@@ -138,54 +145,64 @@ private def buildDecideTrue (type : Expr) : TacticM Expr := do
   let tac ← `(tactic| (with_unfolding_all decide))
   proveByTactic type tac
 
+/-- Helper: intro a fresh hypothesis on the main goal, returning its
+`FVarId` and updating the tactic frame. -/
+private def introMain (name : Name) : TacticM FVarId := do
+  let mv ← Tactic.getMainGoal
+  let (fv, mv') ← mv.intro name
+  Tactic.replaceMainGoal [mv']
+  return fv
+
 /-- Close the main goal of a closed-positivity SOS witness application. -/
-def closeClosedSos (mvarId : MVarId) (parsed : Sos.Reify.ParsedGoal)
+def closeClosedSos (parsed : Sos.Reify.ParsedGoal)
     (certE : Expr) : TacticM Unit := do
   let some pTree := parsed.goal_pTree |
     throwError "sos_witness (closed): missing goal_pTree"
   let some goalAbs := parsed.goal_orig_abs |
     throwError "sos_witness (closed): missing goal_orig_abs"
-  -- Step 1: introduce x and the constraint hypotheses.
-  let (xFVar, mvarId) ← mvarId.intro `x
+  -- Step 1: introduce x and the constraint hypotheses through the tactic
+  -- frame so the goal state stays consistent.
+  let xFVar ← introMain `x
   let mut hFVars : Array FVarId := #[]
-  let mut mv := mvarId
   for _ in parsed.gs_pTrees do
-    let (h, mv') ← mv.intro `h
-    hFVars := hFVars.push h
-    mv := mv'
-  -- Switch tactic state to `mv` so that subsequent helpers see x and h.
-  Tactic.setGoals [mv]
-  mv.withContext do
+    hFVars := hFVars.push (← introMain `h)
+  -- Step 2-6: build the proof term in the main-goal context.
+  Tactic.withMainContext do
+    let mv ← Tactic.getMainGoal
     let xE := Lean.mkFVar xFVar
-    -- Step 2: build the per-hypothesis bridged proofs.
     let mut hAevalProofs : List Expr := []
-    for (gTree, gAbs, hFVar) in parsed.gs_pTrees.zip
-        (parsed.gs_orig_abs.zip hFVars.toList) |>.map
-          (fun (a, b, c) => (a, b, c)) do
+    for i in [:parsed.gs_pTrees.length] do
+      let gTree := parsed.gs_pTrees[i]!
+      let gAbs := parsed.gs_orig_abs[i]!
+      let hFVar := hFVars[i]!
       let origExpr := gAbs.instantiate1 xE
       let eqProof ← buildBridgeEq parsed.n xE gTree origExpr
       let hExpr := Lean.mkFVar hFVar
-      let aProof ← mkAppM ``Sos.aeval_nonneg_of_orig #[eqProof, hExpr]
+      -- Pin the expected type of `eqProof` so mkAppM doesn't try to read
+      -- the simp-reduced form back from `eqProof`'s inferred type.
+      let gE := Lean.toExpr gTree
+      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig
+        #[some (Lean.mkNatLit parsed.n), some xE, some gE, some origExpr,
+          some eqProof, some hExpr]
       hAevalProofs := hAevalProofs ++ [aProof]
-    -- Step 3: build the gsList expression and the forall-mem proof.
     let gsListE ← gsCMvListExpr parsed.n parsed.gs_pTrees
     let hgsProof ← buildForallMemProof parsed.n xE parsed.gs_pTrees hAevalProofs
-    -- Step 4: discharge `cert.checks (.closed pCMv) gsList = true` via decide.
     let pCMv ← toCMvExpr parsed.n pTree
     let goalE ← mkAppOptM ``Sos.Goal.closed #[some (Lean.mkNatLit parsed.n), some pCMv]
     let checksE ← mkAppM ``Sos.Certificate.checks #[certE, goalE, gsListE]
     let trueE ← mkAppOptM ``Bool.true #[]
     let decType ← mkEq checksE trueE
     let decProof ← buildDecideTrue decType
-    -- Step 5: apply sos_sound.
     let hTarget ← mkAppM ``Sos.sos_sound
       #[pCMv, gsListE, certE, decProof, xE, hgsProof]
-    -- Step 6: bridge the conclusion back to the original goal.
     let origGoal := goalAbs.instantiate1 xE
     let eqProof_p ← buildBridgeEq parsed.n xE pTree origGoal
-    let final ← mkAppM ``Sos.nonneg_orig_of_aeval #[eqProof_p, hTarget]
+    let pE := Lean.toExpr pTree
+    let final ← mkAppOptM ``Sos.nonneg_orig_of_aeval
+      #[some (Lean.mkNatLit parsed.n), some xE, some pE, some origGoal,
+        some eqProof_p, some hTarget]
     mv.assign final
-    Tactic.setGoals []
+    Tactic.replaceMainGoal []
 
 /-! ### Tactic surface -/
 
@@ -207,7 +224,7 @@ elab_rules : tactic
       let certE ← Term.elabTermEnsuringType cert certTy
       Term.synthesizeSyntheticMVarsNoPostponing
       let certE ← instantiateMVars certE
-      closeClosedSos mvarId parsed certE
+      closeClosedSos parsed certE
     | _ =>
       throwError "sos_witness: only closed-positivity goals are supported in this build"
 

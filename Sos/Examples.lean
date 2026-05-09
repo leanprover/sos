@@ -105,4 +105,23 @@ example :
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by
   sos_witness handCert_x2_plus_1
 
+/-- `(x 0 + x 1)² = (x 0)² + 2·x 0·x 1 + (x 1)²`. -/
+def handCert_perfect_square : Certificate 2 :=
+  { sigma0 :=
+      { squares := [CMvPolynomial.X 0 + CMvPolynomial.X 1] },
+    sigmas := [] }
+
+example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by
+  sos_witness handCert_perfect_square
+
+/-- For `0 ≤ x 0 → 0 ≤ (x 0)² - x 0 + 1/4`: `(x 0 - 1/2)²` decomposes
+the conclusion; the constraint plays no part. -/
+def handCert_constrained : Certificate 1 :=
+  { sigma0 :=
+      { squares := [CMvPolynomial.X 0 - CMvPolynomial.C (1/2)] },
+    sigmas := [{ squares := [] }] }
+
+example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^2 - x 0 + 1/4 := by
+  sos_witness handCert_constrained
+
 def main : IO Unit := runSmoke
