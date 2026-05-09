@@ -56,6 +56,39 @@ these via the ring-hom structure of `eval₂Hom`.
       CMvPolynomial.aeval_eq_eval₂]
   exact (CMvPolynomial.eval₂Hom (algebraMap R σ) f).map_sub p q
 
+@[simp] lemma CMvPolynomial.aeval_pow {R σ : Type*}
+    [CommSemiring R] [BEq R] [LawfulBEq R]
+    [CommSemiring σ] [Algebra R σ]
+    (f : Fin n → σ) (p : CMvPolynomial n R) (k : ℕ) :
+    CMvPolynomial.aeval f (p ^ k) = (CMvPolynomial.aeval f p) ^ k := by
+  rw [CMvPolynomial.aeval_eq_eval₂, CMvPolynomial.aeval_eq_eval₂]
+  exact (CMvPolynomial.eval₂Hom (algebraMap R σ) f).map_pow p k
+
+/-! ### Reflection: typed AST evaluation matches CMvPolynomial aeval -/
+
+/-- The bridge between the typed AST `Sos.Poly n` and CompPoly's
+`CMvPolynomial n ℚ`: evaluating the AST in `ℝ` agrees with evaluating
+its `CMvPolynomial` image via `aeval`. Drives the `bridgeTo` /
+`bridgeFrom` elaborator helpers. -/
+theorem Poly.evalReal_eq_aeval (φ : Fin n → ℝ) (p : Sos.Poly n) :
+    p.evalReal φ = CMvPolynomial.aeval φ p.toCMv := by
+  induction p with
+  | const r =>
+    simp only [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_C]
+    rfl
+  | var i =>
+    simp only [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_X]
+  | neg p ih =>
+    rw [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_neg, ih]
+  | add p q ihp ihq =>
+    rw [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_add, ihp, ihq]
+  | sub p q ihp ihq =>
+    rw [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_sub, ihp, ihq]
+  | mul p q ihp ihq =>
+    rw [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_mul, ihp, ihq]
+  | pow p k ih =>
+    rw [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_pow, ih]
+
 /-! ### Soundness theorems -/
 
 /-- A square is non-negative under any algebra evaluation into a linearly
