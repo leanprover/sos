@@ -139,5 +139,6 @@ example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by
 
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
 example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by sos
+example : ∀ x : Fin 1 → ℝ, 0 < (x 0)^2 + 1 := by sos
 
 def main : IO Unit := runSmoke

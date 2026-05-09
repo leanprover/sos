@@ -322,6 +322,40 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
       return some cert
   return none
 
+/-! ### Strict positivity via ε-schedule
+
+The proper LP-slack-maximisation encoding (one extra LP block with a
+slack variable λ, optimising `-λ`) lives in the original Harrison
+plan. The schedule below exchanges optimality for simplicity: we try
+a list of progressively smaller positive rationals `ε`, calling
+`runFeasibilitySearch` on `p - ε` for each, and stop at the first ε
+that yields a valid certificate. -/
+
+/-- Rationals tried in order when searching for a strict-positivity
+witness. -/
+def strictEpsSchedule : List ℚ :=
+  [1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64, 1/128, 1/256, 1/512]
+
+/-- Strict-positivity certificate output bundle. -/
+structure StrictResult (n : Nat) where
+  cert : Certificate n
+  ε    : ℚ
+  hε   : 0 < ε
+
+/-- Search for a strict-positivity certificate by trying each ε in
+`strictEpsSchedule`. -/
+def runStrictSearch (p : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) :
+    IO (Option (StrictResult n)) := do
+  for ε in strictEpsSchedule do
+    if hε : 0 < ε then
+      let goal : Goal n := .strict p ε hε
+      let target := p - CMvPolynomial.C ε
+      match (← runFeasibilitySearch target gs goal) with
+      | some cert => return some { cert, ε, hε }
+      | none => pure ()
+  return none
+
 /-- Top-level search driver. Dispatches on the goal shape. -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
     IO (Option (Certificate n)) := do
@@ -329,8 +363,9 @@ def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
   | .closed p     => runFeasibilitySearch p gs goal
   | .infeasible   => runFeasibilitySearch (-1) gs goal
   | .strict _ _ _ =>
-    -- TODO(v0.2): LP-slack-maximisation encoding for strict positivity.
-    -- For v0.1, fall through.
+    -- The strict case yields both a certificate and an ε. Callers that
+    -- only want the certificate (e.g. to exercise the verifier) should
+    -- use `runStrictSearch`. Here we drop the ε.
     return none
 
 end Sos.Search

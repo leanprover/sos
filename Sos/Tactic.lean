@@ -222,6 +222,43 @@ def closeClosedSos (parsed : Sos.Reify.ParsedGoal)
     mv.assign final
     Tactic.replaceMainGoal []
 
+/-- Close the main goal of a strict-positivity SOS witness application,
+given the certificate, the slack `ε`, and a proof `0 < ε`. -/
+def closeStrictSos (parsed : Sos.Reify.ParsedGoal)
+    (certE : Expr) (εE : Expr) (hεE : Expr) : TacticM Unit := do
+  let some pTree := parsed.goal_pTree |
+    throwError "sos (strict): missing goal_pTree"
+  let some goalAbs := parsed.goal_orig_abs |
+    throwError "sos (strict): missing goal_orig_abs"
+  let xFVar ← introMain `x
+  let mut hFVars : Array FVarId := #[]
+  for _ in parsed.gs_pTrees do
+    hFVars := hFVars.push (← introMain `h)
+  Tactic.withMainContext do
+    let mv ← Tactic.getMainGoal
+    let xE := Lean.mkFVar xFVar
+    let hAevalProofs ← buildHypothesisAevalProofs parsed xE hFVars
+    let gsListE ← gsCMvListExpr parsed.n parsed.gs_pTrees
+    let hgsProof ← buildForallMemProof parsed.n xE parsed.gs_pTrees hAevalProofs
+    let pCMv ← toCMvExpr parsed.n pTree
+    let goalE ← mkAppOptM ``Sos.Goal.strict
+      #[some (Lean.mkNatLit parsed.n), some pCMv, some εE, some hεE]
+    let checksE ← mkAppM ``Sos.Certificate.checks #[certE, goalE, gsListE]
+    let trueE ← mkAppOptM ``Bool.true #[]
+    let decType ← mkEq checksE trueE
+    let decProof ← buildDecideTrue decType
+    -- sos_strict_sound : (p) (ε) (hε) (gs) (cert) (h_check) (φ) (h_gs) → 0 < aeval φ p
+    let hTarget ← mkAppM ``Sos.sos_strict_sound
+      #[pCMv, εE, hεE, gsListE, certE, decProof, xE, hgsProof]
+    let origGoal := goalAbs.instantiate1 xE
+    let eqProof_p ← buildBridgeEq parsed.n xE pTree origGoal
+    let pE := Lean.toExpr pTree
+    let final ← mkAppOptM ``Sos.pos_orig_of_aeval
+      #[some (Lean.mkNatLit parsed.n), some xE, some pE, some origGoal,
+        some eqProof_p, some hTarget]
+    mv.assign final
+    Tactic.replaceMainGoal []
+
 /-- Close the main goal of an infeasibility SOS witness application. The
 goal must reduce after `intro x` to `<gᵢ_constraints> → False`. -/
 def closeInfeasibleSos (parsed : Sos.Reify.ParsedGoal)
@@ -294,8 +331,26 @@ elab_rules : tactic
       | some cert =>
         let certE ← certExprOfRuntime parsed.n cert
         closeInfeasibleSos parsed certE
-    | _ =>
-      throwError "sos: strict-positivity goals are not yet supported"
+    | .strict =>
+      let some pTree := parsed.goal_pTree |
+        throwError "sos (strict): missing goal_pTree"
+      let pCMv := Sos.Poly.toCMv pTree
+      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+      let res? ← (Sos.Search.runStrictSearch pCMv gsCMv : IO _)
+      match res? with
+      | none => throwError "sos: search failed to find a strict-positivity certificate"
+      | some res =>
+        let certE ← certExprOfRuntime parsed.n res.cert
+        let εE := Lean.toExpr res.ε
+        -- Discharge `0 < res.ε` via `decide`.
+        let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
+          #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
+        let hεE ← buildDecideTrue (← mkEq
+          (← mkAppOptM ``Decidable.decide #[some hεType, none])
+          (Lean.mkConst ``Bool.true))
+        -- Convert the `decide ... = true` to a `0 < ε` proof via `of_decide_eq_true`.
+        let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
+        closeStrictSos parsed certE εE hεProof
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do
