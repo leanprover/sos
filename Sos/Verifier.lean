@@ -89,6 +89,34 @@ theorem Poly.evalReal_eq_aeval (φ : Fin n → ℝ) (p : Sos.Poly n) :
   | pow p k ih =>
     rw [Poly.evalReal, Poly.toCMv, CMvPolynomial.aeval_pow, ih]
 
+/-! ### Bridge lemmas for the elaborator
+
+These two lemmas package the round-trip between user-side arithmetic
+expressions and `aeval x p.toCMv`-form goals fed to `sos_sound`. -/
+
+/-- Bring a hypothesis `0 ≤ origExpr` into `0 ≤ aeval x p.toCMv` form, given
+a proof `evalReal x p = origExpr` (typically by `simp [evalReal]; ring`). -/
+theorem aeval_nonneg_of_orig
+    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
+    (h_eq : Sos.Poly.evalReal x p = e) (h : 0 ≤ e) :
+    0 ≤ CMvPolynomial.aeval x p.toCMv := by
+  rw [← Sos.Poly.evalReal_eq_aeval, h_eq]; exact h
+
+/-- Take a `0 ≤ aeval x p.toCMv` proof back to the user goal `0 ≤ origExpr`,
+given the same bridge equality. -/
+theorem nonneg_orig_of_aeval
+    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
+    (h_eq : Sos.Poly.evalReal x p = e) (h : 0 ≤ CMvPolynomial.aeval x p.toCMv) :
+    0 ≤ e := by
+  rw [← h_eq, Sos.Poly.evalReal_eq_aeval]; exact h
+
+/-- Strict version of `nonneg_orig_of_aeval`. -/
+theorem pos_orig_of_aeval
+    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
+    (h_eq : Sos.Poly.evalReal x p = e) (h : 0 < CMvPolynomial.aeval x p.toCMv) :
+    0 < e := by
+  rw [← h_eq, Sos.Poly.evalReal_eq_aeval]; exact h
+
 /-! ### Soundness theorems -/
 
 /-- A square is non-negative under any algebra evaluation into a linearly

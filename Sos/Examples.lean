@@ -88,4 +88,21 @@ run_meta do
     throwError "Sos.Poly.decompile round-trip failed"
   IO.println "✓ Sos.Poly.decompile round-trip ok"
 
+/-! ### `sos_witness` end-to-end on a hand-built certificate. -/
+
+/-- Hand-crafted certificate for `(x 0)² + 1 ≥ 0`: `σ₀ = (X 0)² + 1²`. -/
+def handCert_x2_plus_1 : Certificate 1 :=
+  { sigma0 := { squares := [CMvPolynomial.X 0, CMvPolynomial.C 1] },
+    sigmas := [] }
+
+-- Sanity check: the cert validates `(Poly.var 0)² + 1`.
+example :
+    handCert_x2_plus_1.checks
+      (.closed ((Sos.Poly.add (Sos.Poly.pow (Sos.Poly.var 0) 2)
+                              (Sos.Poly.const 1)).toCMv : CMvPolynomial 1 ℚ)) [] = true := by
+  with_unfolding_all decide
+
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by
+  sos_witness handCert_x2_plus_1
+
 def main : IO Unit := runSmoke

@@ -42,22 +42,22 @@ inductive ShapeKind where
 
 /-- All data the elaborator needs from reification.
 
-* `xFVar`: the introduced bound variable `x : Fin n → ℝ`.
-* `goal_pTree` / `goal_orig_expr`: the conclusion polynomial as both
-  the typed AST and the original Lean expression. Absent (`none`)
-  for `.infeasible`.
-* `gs_pTrees` / `gs_orig_exprs`: the constraint polynomials, paired
-  by index. Both lists have the same length.
-* `numHyps` is the number of constraint hypotheses introduced.
+* `goal_pTree` is the conclusion polynomial as a typed AST. Absent
+  (`none`) iff `shape = .infeasible`.
+* `goal_orig_abs` / `gs_orig_abs` are the original arithmetic Lean
+  expressions for the conclusion / constraints, abstracted over the
+  bound variable: `bvar 0` represents `x : Fin n → ℝ`. Re-instantiate
+  via `e.instantiate1 (mkFVar newX)` once the elaborator has
+  introduced its own `x`.
+* `gs_pTrees` / `gs_orig_abs` are paired by index.
 -/
 structure ParsedGoal where
   n              : Nat
-  xFVar          : FVarId
   shape          : ShapeKind
-  goal_pTree     : Option (Sos.Poly n)        -- none iff shape = .infeasible
-  goal_orig_expr : Option Lean.Expr           -- none iff shape = .infeasible
+  goal_pTree     : Option (Sos.Poly n)
+  goal_orig_abs  : Option Lean.Expr
   gs_pTrees      : List (Sos.Poly n)
-  gs_orig_exprs  : List Lean.Expr
+  gs_orig_abs    : List Lean.Expr
 
 namespace ParsedGoal
 
@@ -298,23 +298,23 @@ def parseGoalFull (mvarId : MVarId) :
     let body := body.instantiate1 xLocal
     let xFVar := xLocal.fvarId!
     let (hypsExprs, conclExpr) := stripImplications body
-    -- Reify each hypothesis: must be 0 ≤ g x or g x ≥ 0 etc.
     let mut gs_pTrees : List (Sos.Poly n) := []
-    let mut gs_orig_exprs : List Lean.Expr := []
+    let mut gs_orig_abs : List Lean.Expr := []
     for hExpr in hypsExprs do
       let some (origExpr, pTree) ← constraintExpr? n xFVar hExpr |
         throwError "sos: hypothesis not in supported shape: {indentExpr hExpr}"
       gs_pTrees := gs_pTrees ++ [pTree]
-      gs_orig_exprs := gs_orig_exprs ++ [origExpr]
-    -- Reify the conclusion.
+      gs_orig_abs := gs_orig_abs ++ [origExpr.abstract #[xLocal]]
     let some shape ← conclusionShape? n xFVar conclExpr | return none
     match shape with
     | .closed origExpr pTree =>
-      return some ⟨n, xFVar, .closed, some pTree, some origExpr, gs_pTrees, gs_orig_exprs⟩
+      return some ⟨n, .closed, some pTree, some (origExpr.abstract #[xLocal]),
+                   gs_pTrees, gs_orig_abs⟩
     | .strict origExpr pTree =>
-      return some ⟨n, xFVar, .strict, some pTree, some origExpr, gs_pTrees, gs_orig_exprs⟩
+      return some ⟨n, .strict, some pTree, some (origExpr.abstract #[xLocal]),
+                   gs_pTrees, gs_orig_abs⟩
     | .infeasible =>
-      return some ⟨n, xFVar, .infeasible, none, none, gs_pTrees, gs_orig_exprs⟩
+      return some ⟨n, .infeasible, none, none, gs_pTrees, gs_orig_abs⟩
 
 /-- Backwards-compatible thin wrapper: returns the legacy `(n, goal, gs_cmv)` triple. -/
 def parseGoal (mvarId : MVarId) :
