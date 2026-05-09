@@ -281,13 +281,21 @@ elab_rules : tactic
       let goal : Sos.Goal parsed.n := .closed pCMv
       let cert? ← (Sos.Search.runSearch goal gsCMv : IO _)
       match cert? with
-      | none =>
-        throwError "sos: search failed to find a certificate"
+      | none => throwError "sos: search failed to find a certificate"
       | some cert =>
         let certE ← certExprOfRuntime parsed.n cert
         closeClosedSos parsed certE
+    | .infeasible =>
+      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+      let goal : Sos.Goal parsed.n := .infeasible
+      let cert? ← (Sos.Search.runSearch goal gsCMv : IO _)
+      match cert? with
+      | none => throwError "sos: search failed to find an infeasibility certificate"
+      | some cert =>
+        let certE ← certExprOfRuntime parsed.n cert
+        closeInfeasibleSos parsed certE
     | _ =>
-      throwError "sos: only closed-positivity goals are supported in this build"
+      throwError "sos: strict-positivity goals are not yet supported"
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do

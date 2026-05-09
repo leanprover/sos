@@ -104,14 +104,20 @@ list. Block 0 is σ₀ (multiplier = 1); block i+1 is σᵢ (multiplier = gᵢ).
 def buildBlocks (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) : Array (BlockSpec n) := Id.run do
   let targetDeg := target.totalDegree
+  -- The Putinar identity `target = σ₀ + Σᵢ σᵢ·gᵢ` allows `deg(σ₀)` to
+  -- reach `max(deg(target), max_i deg(σᵢ·gᵢ)) ≤ max(deg(target), max_i
+  -- deg(gᵢ) + deg(σᵢ))`. For infeasibility (`target = -1`) the σ₀
+  -- terms must cancel against constraint products, so we size the
+  -- basis using the maximum constraint degree as well.
+  let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
+  let σ₀Deg := Nat.max targetDeg maxGDeg
   let mut blocks : Array (BlockSpec n) := #[]
   -- Block 0: σ₀.
   -- Heuristic: drop the constant monomial from the σ₀ basis when the
   -- target has no constant term. The corresponding `M[0][0]` would be
   -- forced to zero, leaving CSDP's interior-point step on the boundary
-  -- of PSD and stalling its line search. The remaining basis still
-  -- spans the target's Newton polytope.
-  let σ₀Basis := monomialsUpTo n (halfCeil targetDeg)
+  -- of PSD and stalling its line search.
+  let σ₀Basis := monomialsUpTo n (halfCeil σ₀Deg)
   let σ₀Basis :=
     if target.coeff (zeroMono n) = 0 then
       σ₀Basis.filter (fun m => m ≠ zeroMono n)
@@ -120,7 +126,7 @@ def buildBlocks (target : CMvPolynomial n ℚ)
   -- Blocks 1..m: σᵢ for each gᵢ.
   for g in gs do
     let gDeg := g.totalDegree
-    let basisDeg := multiplierBasisDeg targetDeg gDeg
+    let basisDeg := multiplierBasisDeg σ₀Deg gDeg
     let basis := monomialsUpTo n basisDeg
     -- Always include at least the constant monomial.
     let basis := if basis.size == 0 then monomialsUpTo n 0 else basis
