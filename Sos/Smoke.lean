@@ -26,4 +26,53 @@ def runSmoke : IO Unit := do
   | none =>
     IO.println "✗ no cert found"
 
-def main : IO Unit := runSmoke
+/-! ### Stalling-case probes (Plan B‴ Task A measurement)
+
+Two end-state goals previously stalled CSDP because the unique
+Putinar SOS Gram is rank-1 on the PSD boundary. Run both through
+the (now trace-minimising) search and report whether a valid
+certificate is produced. -/
+
+/-- `(x 0 + x 1)² = (X 0)² + 2·X 0·X 1 + (X 1)²`. Closed positivity. -/
+def perfectSquareTarget : CMvPolynomial 2 ℚ :=
+  let x0 : CMvPolynomial 2 ℚ := CMvPolynomial.X 0
+  let x1 : CMvPolynomial 2 ℚ := CMvPolynomial.X 1
+  x0 * x0 + CMvPolynomial.C 2 * x0 * x1 + x1 * x1
+
+def runProbePerfectSquare : IO Unit := do
+  IO.println "=== probe: 0 ≤ (x 0 + x 1)² ==="
+  let goal : Goal 2 := .closed perfectSquareTarget
+  let t0 ← IO.monoMsNow
+  match (← Sos.Search.runSearch goal []) with
+  | some cert =>
+    let t1 ← IO.monoMsNow
+    IO.println s!"✓ ({t1 - t0} ms) cert: {cert.sigma0.squares.length} σ₀-squares, \
+      {cert.sigmas.length} σᵢ blocks; checks = {cert.checks goal []}"
+  | none =>
+    let t1 ← IO.monoMsNow
+    IO.println s!"✗ ({t1 - t0} ms) no cert"
+
+/-- Constrained `0 ≤ x 0 → 0 ≤ (x 0)² - x 0 + 1/4`. The reified
+constraint is `g₀ = X 0`. -/
+def constrainedTarget : CMvPolynomial 1 ℚ :=
+  let x0 : CMvPolynomial 1 ℚ := CMvPolynomial.X 0
+  x0 * x0 - x0 + CMvPolynomial.C (1/4)
+
+def runProbeConstrained : IO Unit := do
+  IO.println "=== probe: 0 ≤ x 0 → 0 ≤ (x 0)² - x 0 + 1/4 ==="
+  let g0 : CMvPolynomial 1 ℚ := CMvPolynomial.X 0
+  let goal : Goal 1 := .closed constrainedTarget
+  let t0 ← IO.monoMsNow
+  match (← Sos.Search.runSearch goal [g0]) with
+  | some cert =>
+    let t1 ← IO.monoMsNow
+    IO.println s!"✓ ({t1 - t0} ms) cert: {cert.sigma0.squares.length} σ₀-squares, \
+      {cert.sigmas.length} σᵢ blocks; checks = {cert.checks goal [g0]}"
+  | none =>
+    let t1 ← IO.monoMsNow
+    IO.println s!"✗ ({t1 - t0} ms) no cert"
+
+def main : IO Unit := do
+  runSmoke
+  runProbePerfectSquare
+  runProbeConstrained

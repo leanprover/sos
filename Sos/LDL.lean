@@ -44,8 +44,16 @@ namespace LDLT
 
 end LDLT
 
-/-- Compute the rational LDLᵀ decomposition of a symmetric matrix `Q` (in
-upper-triangle flat form). Returns `none` if any pivot is non-positive. -/
+/-- Compute the rational LDLᵀ decomposition of a symmetric matrix `Q`
+(upper-triangle flat form). Returns `none` if any pivot is strictly
+negative or if the matrix is not PSD. Zero pivots are accepted when
+the corresponding residual column is also zero — this is the
+"completing the square" convention from Harrison's HOL Light
+`Examples/sos.ml`, and lets us decompose rank-deficient PSD matrices
+whose Gram lies on the boundary of the PSD cone (e.g. the unique SOS
+Gram of `(x + y)²`). When `D[j] = 0` we set `L[i, j] := 0` for
+`i > j`; `LDL.reconstruct` and `transposeMulBasis` already drop
+zero-`D` and zero-`L` contributions. -/
 def decompose (n : Nat) (Q : Array ℚ) : Option LDLT := Id.run do
   let mut L : Array ℚ := Array.replicate (n * n) 0
   let mut D : Array ℚ := Array.replicate n 0
@@ -54,14 +62,24 @@ def decompose (n : Nat) (Q : Array ℚ) : Option LDLT := Id.run do
     for k in [0:j] do
       let ljk := L[j * n + k]!
       djAcc := djAcc - D[k]! * ljk * ljk
-    if djAcc ≤ 0 then return none
+    if djAcc < 0 then return none
     D := D.set! j djAcc
     L := L.set! (j * n + j) 1
-    for i in [j+1:n] do
-      let mut numer : ℚ := readSym n Q i j
-      for k in [0:j] do
-        numer := numer - D[k]! * L[i * n + k]! * L[j * n + k]!
-      L := L.set! (i * n + j) (numer / djAcc)
+    if djAcc = 0 then
+      -- Rank deficient at this pivot. The matrix is PSD iff the
+      -- residual column for this `j` is also zero. Check; reject if
+      -- any residual is non-zero, otherwise leave `L[i, j] = 0`.
+      for i in [j+1:n] do
+        let mut numer : ℚ := readSym n Q i j
+        for k in [0:j] do
+          numer := numer - D[k]! * L[i * n + k]! * L[j * n + k]!
+        if numer ≠ 0 then return none
+    else
+      for i in [j+1:n] do
+        let mut numer : ℚ := readSym n Q i j
+        for k in [0:j] do
+          numer := numer - D[k]! * L[i * n + k]! * L[j * n + k]!
+        L := L.set! (i * n + j) (numer / djAcc)
   return some { n := n, L := L, D := D }
 
 /-! ### Lagrange four-square decomposition -/
@@ -76,8 +94,18 @@ def isqrt (n : Nat) : Nat := Id.run do
   return k
 
 /-- Find naturals `a, b, c, d` with `a² + b² + c² + d² = n`. By Lagrange's
-four-square theorem this exists for every `n : ℕ`; we brute-force search. -/
+four-square theorem this exists for every `n : ℕ`; we brute-force search.
+
+We cap `n` at `1 <<< 20` to bound the worst-case `O(n^(3/2))` inner-loop
+work to a few seconds. The rounding loop in `runFeasibilitySearch`
+calls this on `target_pivot.num · target_pivot.den` per LDL diagonal;
+huge `num · den` happens when CSDP rounding noise produces tiny
+pivots at large schedule denominators (the rounded value is "real
+noise rounded to a fine grid", not a genuine SOS coefficient). Giving
+up on those rounding attempts is the right semantics — the next
+denominator in the schedule is what we want to try. -/
 def fourSquaresNat (n : Nat) : Option (Nat × Nat × Nat × Nat) := Id.run do
+  if n > 1 <<< 20 then return none
   let m := isqrt n
   for d in [0:m+1] do
     if d * d > n then break

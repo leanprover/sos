@@ -210,10 +210,29 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
                   col := UInt32.ofNat (k + 1)
                   value := ratToFloat val }
     return acc
+  -- Cost matrix: minimise `tr(X) = Σ_b Σ_j M_b[j,j]`. CSDP minimises
+  -- `tr(C·X)`, so populating `c` with `(b, j, j, 1.0)` for every block
+  -- diagonal position expresses `min tr(X)`. Pure feasibility (`c = []`)
+  -- leaves CSDP's primal objective at 0 and gives no preferred direction
+  -- when the feasible set is a single boundary point; Harrison's HOL
+  -- Light SOS reports that an arbitrary objective improves rounding
+  -- behaviour and may change CSDP's stopping criterion. This is an
+  -- empirical knob, not a principled cure for boundary feasibility.
+  let cTriples : Array LeanCsdp.Triple := Id.run do
+    let mut acc : Array LeanCsdp.Triple := #[]
+    for blockIdx in [0:blocks.size] do
+      let block := blocks[blockIdx]!
+      for j in [0:block.size] do
+        acc := acc.push
+          { block := UInt32.ofNat (blockIdx + 1)
+            row   := UInt32.ofNat (j + 1)
+            col   := UInt32.ofNat (j + 1)
+            value := 1.0 }
+    return acc
   let problem : LeanCsdp.Problem :=
     { blockSizes := blockSizes
       b := b
-      c := #[]              -- feasibility (no objective)
+      c := cTriples
       a := aTriples
       constantOffset := 0.0 }
   (problem, blocks, monos)
@@ -221,19 +240,27 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
 /-! ### Denominator schedule for rational rounding -/
 
 /-- Schedule of denominators tried by the rational rounder, adapted from
-`sos.ml`'s `find_rounding`. First small integers, then powers of two. -/
+`sos.ml`'s `find_rounding`. First small integers, then powers of two.
+
+Harrison's HOL Light caps at `2^66`; we cap at `2^20`. Beyond that
+range, CSDP rounding noise produces tiny positive `LDL` pivots whose
+`fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
+practical wall time. If a target genuinely needs a denom ≥ 2^20 to
+round cleanly, we treat the search as a fall-through and rely on
+`sos_witness <hand-cert>` (matching Harrison's documented rounding
+caveat). -/
 def niceDenominators : List ℚ :=
   let smalls : List ℚ := (List.range 31).map (fun i => (i + 1 : ℚ))
-  let powTwo : List ℚ := (List.range 62).map (fun i => (2 ^ (i + 5) : ℚ))
+  let powTwo : List ℚ := (List.range 16).map (fun i => (2 ^ (i + 5) : ℚ))
   smalls ++ powTwo
 
-/-- Round a single float to the nearest rational at denominator `d`. -/
+/-- Round a single float to the nearest rational at denominator `d`,
+using round-half-away-from-zero on the numerator. -/
 def niceRound (d : ℚ) (x : Float) : ℚ :=
   let dFloat : Float := ratToFloat d
-  let scaled := x * dFloat + 0.5
-  let nUnsigned : Int := scaled.toUInt64.toNat
   let nSigned : Int :=
-    if scaled < 0 then -((-scaled).toUInt64.toNat : Int) else nUnsigned
+    if x < 0 then -(((-x) * dFloat + 0.5).toUInt64.toNat : Int)
+    else (x * dFloat + 0.5).toUInt64.toNat
   (nSigned : ℚ) / d
 
 /-! ### Decoding `Solution.X` -/
