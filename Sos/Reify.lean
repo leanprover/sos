@@ -29,13 +29,20 @@ open Lean Meta Elab CPoly
 
 /-! ### Goal classification -/
 
-/-- The three goal shapes the reifier recognises. The conclusion's
-polynomial side is held in the `ParsedGoal`'s `goal_pTree` /
-`goal_orig_expr` fields (or absent for `.infeasible`). -/
+/-- The three goal shapes the reifier recognises. -/
 inductive ShapeKind where
   | closed
   | strict
   | infeasible
+  deriving Inhabited, Repr, DecidableEq
+
+/-- Shape of a constraint hypothesis as written by the user. -/
+inductive ConstraintKind where
+  /-- `h : 0 ≤ origExpr` (or `origExpr ≥ 0`, `0 < origExpr`, `origExpr > 0`). -/
+  | nonneg
+  /-- `h : origExpr ≤ 0` (or `0 ≥ origExpr`). The reifier negates the
+  polynomial in `pTree` so the certified facet is again `0 ≤ pTree`. -/
+  | nonpos
   deriving Inhabited, Repr, DecidableEq
 
 /-! ### Output of reification -/
@@ -58,6 +65,7 @@ structure ParsedGoal where
   goal_orig_abs  : Option Lean.Expr
   gs_pTrees      : List (Sos.Poly n)
   gs_orig_abs    : List Lean.Expr
+  gs_kinds       : List ConstraintKind
 
 namespace ParsedGoal
 
@@ -176,41 +184,40 @@ Supported forms:
   * `0 ≥ origExpr` → similarly.
 -/
 def constraintExpr? (n : Nat) (xFVar : FVarId) (h : Expr) :
-    MetaM (Option (Expr × Sos.Poly n)) := do
+    MetaM (Option (Expr × Sos.Poly n × ConstraintKind)) := do
   let h ← whnfR h
   match_expr h with
   | LE.le _ _ a b =>
     if let some r ← ratLit? a then
       if r = 0 then
         let pTree ← reifyExpr n xFVar b
-        return some (b, pTree)
+        return some (b, pTree, .nonneg)
     if let some r ← ratLit? b then
       if r = 0 then
-        -- a ≤ 0 ⟹ -a ≥ 0
         let aTree ← reifyExpr n xFVar a
-        return some (a, Sos.Poly.neg aTree)
+        return some (a, Sos.Poly.neg aTree, .nonpos)
     return none
   | GE.ge _ _ a b =>
     if let some r ← ratLit? b then
       if r = 0 then
         let pTree ← reifyExpr n xFVar a
-        return some (a, pTree)
+        return some (a, pTree, .nonneg)
     if let some r ← ratLit? a then
       if r = 0 then
         let bTree ← reifyExpr n xFVar b
-        return some (b, Sos.Poly.neg bTree)
+        return some (b, Sos.Poly.neg bTree, .nonpos)
     return none
   | LT.lt _ _ a b =>
     if let some r ← ratLit? a then
       if r = 0 then
         let pTree ← reifyExpr n xFVar b
-        return some (b, pTree)
+        return some (b, pTree, .nonneg)
     return none
   | GT.gt _ _ a b =>
     if let some r ← ratLit? b then
       if r = 0 then
         let pTree ← reifyExpr n xFVar a
-        return some (a, pTree)
+        return some (a, pTree, .nonneg)
     return none
   | _ => return none
 
@@ -262,18 +269,24 @@ def conclusionShape? (n : Nat) (xFVar : FVarId) (e : Expr) :
 /-! ### Top-level goal parser -/
 
 /-- Walk a chain of `→` (Pi without dependence) collecting hypothesis
-types and the final conclusion. Stops when the binder body refers to
-the bound variable (so we don't recurse past the conclusion). -/
-partial def stripImplications : Expr → Array Expr × Expr
-  | e =>
+types and the final conclusion. Recognises `Not Q` as `Q → False`. -/
+partial def stripImplications : Expr → MetaM (Array Expr × Expr)
+  | e => do
+    let e ← whnfR e
     match e with
     | .forallE _ ty body bi =>
       if !body.hasLooseBVars && bi.isExplicit then
-        let (rest, concl) := stripImplications body
-        (#[ty] ++ rest, concl)
+        let (rest, concl) ← stripImplications body
+        return (#[ty] ++ rest, concl)
       else
-        (#[], e)
-    | _ => (#[], e)
+        return (#[], e)
+    | _ =>
+      -- Handle `Not Q` explicitly: unfold to `Q → False` and recurse.
+      match_expr e with
+      | Not q =>
+        let (rest, concl) ← stripImplications (Lean.mkConst ``False)
+        return (#[q] ++ rest, concl)
+      | _ => return (#[], e)
 
 /-- Parse the main goal of the given metavariable. Returns `none` if
 the goal isn't in the v0.1 fragment.
@@ -297,24 +310,26 @@ def parseGoalFull (mvarId : MVarId) :
   withLocalDecl `x .default binderType fun xLocal => do
     let body := body.instantiate1 xLocal
     let xFVar := xLocal.fvarId!
-    let (hypsExprs, conclExpr) := stripImplications body
+    let (hypsExprs, conclExpr) ← stripImplications body
     let mut gs_pTrees : List (Sos.Poly n) := []
     let mut gs_orig_abs : List Lean.Expr := []
+    let mut gs_kinds : List ConstraintKind := []
     for hExpr in hypsExprs do
-      let some (origExpr, pTree) ← constraintExpr? n xFVar hExpr |
+      let some (origExpr, pTree, kind) ← constraintExpr? n xFVar hExpr |
         throwError "sos: hypothesis not in supported shape: {indentExpr hExpr}"
       gs_pTrees := gs_pTrees ++ [pTree]
       gs_orig_abs := gs_orig_abs ++ [origExpr.abstract #[xLocal]]
+      gs_kinds := gs_kinds ++ [kind]
     let some shape ← conclusionShape? n xFVar conclExpr | return none
     match shape with
     | .closed origExpr pTree =>
       return some ⟨n, .closed, some pTree, some (origExpr.abstract #[xLocal]),
-                   gs_pTrees, gs_orig_abs⟩
+                   gs_pTrees, gs_orig_abs, gs_kinds⟩
     | .strict origExpr pTree =>
       return some ⟨n, .strict, some pTree, some (origExpr.abstract #[xLocal]),
-                   gs_pTrees, gs_orig_abs⟩
+                   gs_pTrees, gs_orig_abs, gs_kinds⟩
     | .infeasible =>
-      return some ⟨n, .infeasible, none, none, gs_pTrees, gs_orig_abs⟩
+      return some ⟨n, .infeasible, none, none, gs_pTrees, gs_orig_abs, gs_kinds⟩
 
 /-- Backwards-compatible thin wrapper: returns the legacy `(n, goal, gs_cmv)` triple. -/
 def parseGoal (mvarId : MVarId) :

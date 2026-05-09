@@ -153,6 +153,41 @@ private def introMain (name : Name) : TacticM FVarId := do
   Tactic.replaceMainGoal [mv']
   return fv
 
+/-- Build the per-hypothesis bridged proofs `0 ≤ aeval x g_i.toCMv` from
+the user's introduced hypothesis FVars. Dispatches on the constraint
+kind: `nonneg` uses `aeval_nonneg_of_orig`; `nonpos` uses
+`aeval_nonneg_of_orig_neg`, with the bridge equality
+`evalReal x g_i = -origExpr_i`. -/
+private def buildHypothesisAevalProofs (parsed : Sos.Reify.ParsedGoal)
+    (xE : Expr) (hFVars : Array FVarId) : TacticM (List Expr) := do
+  let nE := Lean.mkNatLit parsed.n
+  let mut acc : List Expr := []
+  for i in [:parsed.gs_pTrees.length] do
+    let gTree := parsed.gs_pTrees[i]!
+    let gAbs := parsed.gs_orig_abs[i]!
+    let kind := parsed.gs_kinds[i]!
+    let hFVar := hFVars[i]!
+    let origExpr := gAbs.instantiate1 xE
+    let hExpr := Lean.mkFVar hFVar
+    let gE := Lean.toExpr gTree
+    match kind with
+    | .nonneg =>
+      -- evalReal x g = origExpr
+      let eqProof ← buildBridgeEq parsed.n xE gTree origExpr
+      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig
+        #[some nE, some xE, some gE, some origExpr,
+          some eqProof, some hExpr]
+      acc := acc ++ [aProof]
+    | .nonpos =>
+      -- evalReal x g = -origExpr  (because gTree = -reify(origExpr))
+      let negOrig ← mkAppM ``Neg.neg #[origExpr]
+      let eqProof ← buildBridgeEq parsed.n xE gTree negOrig
+      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig_neg
+        #[some nE, some xE, some gE, some origExpr,
+          some eqProof, some hExpr]
+      acc := acc ++ [aProof]
+  return acc
+
 /-- Close the main goal of a closed-positivity SOS witness application. -/
 def closeClosedSos (parsed : Sos.Reify.ParsedGoal)
     (certE : Expr) : TacticM Unit := do
@@ -160,31 +195,14 @@ def closeClosedSos (parsed : Sos.Reify.ParsedGoal)
     throwError "sos_witness (closed): missing goal_pTree"
   let some goalAbs := parsed.goal_orig_abs |
     throwError "sos_witness (closed): missing goal_orig_abs"
-  -- Step 1: introduce x and the constraint hypotheses through the tactic
-  -- frame so the goal state stays consistent.
   let xFVar ← introMain `x
   let mut hFVars : Array FVarId := #[]
   for _ in parsed.gs_pTrees do
     hFVars := hFVars.push (← introMain `h)
-  -- Step 2-6: build the proof term in the main-goal context.
   Tactic.withMainContext do
     let mv ← Tactic.getMainGoal
     let xE := Lean.mkFVar xFVar
-    let mut hAevalProofs : List Expr := []
-    for i in [:parsed.gs_pTrees.length] do
-      let gTree := parsed.gs_pTrees[i]!
-      let gAbs := parsed.gs_orig_abs[i]!
-      let hFVar := hFVars[i]!
-      let origExpr := gAbs.instantiate1 xE
-      let eqProof ← buildBridgeEq parsed.n xE gTree origExpr
-      let hExpr := Lean.mkFVar hFVar
-      -- Pin the expected type of `eqProof` so mkAppM doesn't try to read
-      -- the simp-reduced form back from `eqProof`'s inferred type.
-      let gE := Lean.toExpr gTree
-      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig
-        #[some (Lean.mkNatLit parsed.n), some xE, some gE, some origExpr,
-          some eqProof, some hExpr]
-      hAevalProofs := hAevalProofs ++ [aProof]
+    let hAevalProofs ← buildHypothesisAevalProofs parsed xE hFVars
     let gsListE ← gsCMvListExpr parsed.n parsed.gs_pTrees
     let hgsProof ← buildForallMemProof parsed.n xE parsed.gs_pTrees hAevalProofs
     let pCMv ← toCMvExpr parsed.n pTree
@@ -202,6 +220,33 @@ def closeClosedSos (parsed : Sos.Reify.ParsedGoal)
       #[some (Lean.mkNatLit parsed.n), some xE, some pE, some origGoal,
         some eqProof_p, some hTarget]
     mv.assign final
+    Tactic.replaceMainGoal []
+
+/-- Close the main goal of an infeasibility SOS witness application. The
+goal must reduce after `intro x` to `<gᵢ_constraints> → False`. -/
+def closeInfeasibleSos (parsed : Sos.Reify.ParsedGoal)
+    (certE : Expr) : TacticM Unit := do
+  let xFVar ← introMain `x
+  let mut hFVars : Array FVarId := #[]
+  for _ in parsed.gs_pTrees do
+    hFVars := hFVars.push (← introMain `h)
+  Tactic.withMainContext do
+    let mv ← Tactic.getMainGoal
+    let xE := Lean.mkFVar xFVar
+    let hAevalProofs ← buildHypothesisAevalProofs parsed xE hFVars
+    let gsListE ← gsCMvListExpr parsed.n parsed.gs_pTrees
+    let hgsProof ← buildForallMemProof parsed.n xE parsed.gs_pTrees hAevalProofs
+    let goalE ← mkAppOptM ``Sos.Goal.infeasible #[some (Lean.mkNatLit parsed.n)]
+    let checksE ← mkAppM ``Sos.Certificate.checks #[certE, goalE, gsListE]
+    let trueE ← mkAppOptM ``Bool.true #[]
+    let decType ← mkEq checksE trueE
+    let decProof ← buildDecideTrue decType
+    -- sos_infeasible_sound : (gs : List ...) → (cert : Certificate n) → cert.checks .infeasible gs = true →
+    --                        ∀ x, ¬ ∀ g ∈ gs, 0 ≤ aeval x g
+    let infeasibleProof ← mkAppM ``Sos.sos_infeasible_sound
+      #[gsListE, certE, decProof, xE, hgsProof]
+    -- infeasibleProof : False
+    mv.assign infeasibleProof
     Tactic.replaceMainGoal []
 
 /-! ### Tactic surface -/
@@ -249,14 +294,14 @@ elab_rules : tactic
     let mvarId ← Tactic.getMainGoal
     let some parsed ← Sos.Reify.parseGoalFull mvarId |
       throwError "sos_witness: goal not in supported fragment"
+    let certTy ← mkAppOptM ``Sos.Certificate #[some (Lean.mkNatLit parsed.n)]
+    let certE ← Term.elabTermEnsuringType cert certTy
+    Term.synthesizeSyntheticMVarsNoPostponing
+    let certE ← instantiateMVars certE
     match parsed.shape with
-    | .closed =>
-      let certTy ← mkAppOptM ``Sos.Certificate #[some (Lean.mkNatLit parsed.n)]
-      let certE ← Term.elabTermEnsuringType cert certTy
-      Term.synthesizeSyntheticMVarsNoPostponing
-      let certE ← instantiateMVars certE
-      closeClosedSos parsed certE
+    | .closed => closeClosedSos parsed certE
+    | .infeasible => closeInfeasibleSos parsed certE
     | _ =>
-      throwError "sos_witness: only closed-positivity goals are supported in this build"
+      throwError "sos_witness: strict-positivity goals are not yet supported"
 
 end Sos

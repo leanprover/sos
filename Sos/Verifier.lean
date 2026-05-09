@@ -102,6 +102,16 @@ theorem aeval_nonneg_of_orig
     0 ≤ CMvPolynomial.aeval x p.toCMv := by
   rw [← Sos.Poly.evalReal_eq_aeval, h_eq]; exact h
 
+/-- Bring a hypothesis `origExpr ≤ 0` into `0 ≤ aeval x p.toCMv` form, given
+the bridge equality `evalReal x p = -origExpr`. The reifier emits
+`p = -reify(origExpr)` for `≤ 0` constraints, so this matches. -/
+theorem aeval_nonneg_of_orig_neg
+    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
+    (h_eq : Sos.Poly.evalReal x p = -e) (h : e ≤ 0) :
+    0 ≤ CMvPolynomial.aeval x p.toCMv := by
+  rw [← Sos.Poly.evalReal_eq_aeval, h_eq]
+  exact neg_nonneg.mpr h
+
 /-- Take a `0 ≤ aeval x p.toCMv` proof back to the user goal `0 ≤ origExpr`,
 given the same bridge equality. -/
 theorem nonneg_orig_of_aeval

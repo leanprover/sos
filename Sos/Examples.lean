@@ -124,6 +124,17 @@ def handCert_constrained : Certificate 1 :=
 example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^2 - x 0 + 1/4 := by
   sos_witness handCert_constrained
 
+/-! ### Infeasibility: `(x 0)² + 1 ≤ 0` is impossible. -/
+
+/-- Cert for `¬ ((x 0)² + 1 ≤ 0)`: with `g₀ = -(X 0)² - 1` we have
+`σ₀ = (X 0)²` and `σ₁ = 1`, giving `σ₀ + σ₁ · g₀ = -1`. -/
+def handCert_infeasible : Certificate 1 :=
+  { sigma0 := { squares := [CMvPolynomial.X 0] },
+    sigmas := [{ squares := [CMvPolynomial.C 1] }] }
+
+example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by
+  sos_witness handCert_infeasible
+
 /-! ### Search-driven `by sos` end-to-end. -/
 
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
