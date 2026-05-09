@@ -209,8 +209,40 @@ def closeClosedSos (parsed : Sos.Reify.ParsedGoal)
 syntax (name := sosTactic) "sos" : tactic
 syntax (name := sosWitnessTactic) "sos_witness " term : tactic
 
+/-- Build a `Sos.Certificate n` Expr from a runtime `Certificate n`,
+quoted via `Sos.Poly.decompile` so each square round-trips through
+`ToExpr (Sos.Poly n)`. -/
+private def certExprOfRuntime (n : Nat) (cert : Sos.Certificate n) : MetaM Expr := do
+  let sigma0Decompiled : List (Sos.Poly n) :=
+    cert.sigma0.squares.map Sos.Poly.decompile
+  let sigmasDecompiled : List (List (Sos.Poly n)) :=
+    cert.sigmas.map (·.squares.map Sos.Poly.decompile)
+  let sigma0E := Lean.toExpr sigma0Decompiled
+  let sigmasE := Lean.toExpr sigmasDecompiled
+  mkAppOptM ``Sos.Certificate.fromDecompiled
+    #[some (Lean.mkNatLit n), some sigma0E, some sigmasE]
+
 elab_rules : tactic
-  | `(tactic| sos) => throwError "sos: not yet implemented"
+  | `(tactic| sos) => do
+    let mvarId ← Tactic.getMainGoal
+    let some parsed ← Sos.Reify.parseGoalFull mvarId |
+      throwError "sos: goal not in supported fragment"
+    match parsed.shape with
+    | .closed =>
+      let some pTree := parsed.goal_pTree |
+        throwError "sos (closed): missing goal_pTree"
+      let pCMv := Sos.Poly.toCMv pTree
+      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+      let goal : Sos.Goal parsed.n := .closed pCMv
+      let cert? ← (Sos.Search.runSearch goal gsCMv : IO _)
+      match cert? with
+      | none =>
+        throwError "sos: search failed to find a certificate"
+      | some cert =>
+        let certE ← certExprOfRuntime parsed.n cert
+        closeClosedSos parsed certE
+    | _ =>
+      throwError "sos: only closed-positivity goals are supported in this build"
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do
@@ -219,7 +251,6 @@ elab_rules : tactic
       throwError "sos_witness: goal not in supported fragment"
     match parsed.shape with
     | .closed =>
-      -- Elaborate the certificate term against `Sos.Certificate parsed.n`.
       let certTy ← mkAppOptM ``Sos.Certificate #[some (Lean.mkNatLit parsed.n)]
       let certE ← Term.elabTermEnsuringType cert certTy
       Term.synthesizeSyntheticMVarsNoPostponing

@@ -183,7 +183,13 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
             let m := monos[monoIdx]!
             let c := prod.coeff m
             if c ≠ 0 then
-              let val : ℚ := if j == k then c else c / 2
+              -- CSDP mirrors the upper-triangle of each `A_i` to the
+              -- lower triangle and computes `tr(A_i · X) = Σⱼₖ Aⱼₖ Xⱼₖ`
+              -- on the resulting symmetric matrix. For a symmetric `X`
+              -- this expands to `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ`. We want
+              -- `target.coef(m) = Σⱼ cⱼⱼ Mⱼⱼ + 2 Σⱼ<k cⱼₖ Mⱼₖ` where
+              -- `cⱼₖ = coef(m in zⱼ·zₖ)`, so `Aⱼⱼ = cⱼⱼ`, `Aⱼₖ = cⱼₖ`.
+              let val : ℚ := c
               acc := acc.push
                 { constraint := UInt32.ofNat (monoIdx + 1)
                   block := UInt32.ofNat (blockIdx + 1)

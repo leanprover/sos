@@ -88,4 +88,24 @@ theorem Certificate.checks_iff {n : Nat} (c : Certificate n) (goal : Goal n)
   unfold Certificate.checks
   simp [decide_eq_true_eq]
 
+/-! ### Building certificates from `Sos.Poly`-form data
+
+The search produces `CMvPolynomial`-form squares; the elaborator
+decompiles each square back into a `Sos.Poly n` AST so it can be
+`ToExpr`-quoted into a Lean term. `Certificate.fromDecompiled` then
+maps the AST squares back through `Sos.Poly.toCMv` to assemble a
+`Certificate n`. -/
+
+/-- Lift a `List (Sos.Poly n)` to a `SOSDecomp n` by mapping each
+entry through `Sos.Poly.toCMv`. -/
+def SOSDecomp.fromPolys {n : Nat} (squares : List (Sos.Poly n)) : SOSDecomp n :=
+  { squares := squares.map Sos.Poly.toCMv }
+
+/-- Build a `Certificate n` from `Sos.Poly`-keyed σ₀ / σᵢ data. -/
+def Certificate.fromDecompiled {n : Nat}
+    (sigma0Polys : List (Sos.Poly n))
+    (sigmasPolys : List (List (Sos.Poly n))) : Certificate n :=
+  { sigma0 := SOSDecomp.fromPolys sigma0Polys,
+    sigmas := sigmasPolys.map SOSDecomp.fromPolys }
+
 end Sos

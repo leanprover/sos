@@ -124,4 +124,8 @@ def handCert_constrained : Certificate 1 :=
 example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^2 - x 0 + 1/4 := by
   sos_witness handCert_constrained
 
+/-! ### Search-driven `by sos` end-to-end. -/
+
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
+
 def main : IO Unit := runSmoke
