@@ -17,6 +17,19 @@ namespace SOS
 
 open Lean Elab Tactic Meta
 
+/-! ### Common Expr fragments -/
+
+/-- `Lean.Expr` for `ℝ`, used throughout the elaborator. -/
+private def realTy : Expr := Lean.mkConst ``Real
+
+/-- `Lean.Expr` for `ℚ`, used throughout the elaborator. -/
+private def ratTy : Expr := Lean.mkConst ``Rat
+
+/-- `Lean.Expr` for `CMvPolynomial n ℚ`. -/
+private def cmvType (n : Nat) : MetaM Expr :=
+  Meta.mkAppOptM ``CPoly.CMvPolynomial
+    #[some (Lean.mkNatLit n), some ratTy, none]
+
 /-! ### `SOS.Poly n` → `Lean.Expr` -/
 
 /-- Build a `Lean.Expr` denoting the given `SOS.Poly n` value. -/
@@ -82,8 +95,7 @@ private def toCMvExpr (n : Nat) (p : SOS.Poly n) : MetaM Expr := do
 private def aevalExpr (n : Nat) (xE : Expr) (p : SOS.Poly n) : MetaM Expr := do
   let pCMv ← toCMvExpr n p
   mkAppOptM ``CPoly.CMvPolynomial.aeval #[some (Lean.mkNatLit n),
-    some (Lean.mkConst ``Rat), some (Lean.mkConst ``Real),
-    none, none, none, some xE, some pCMv]
+    some ratTy, some realTy, none, none, none, some xE, some pCMv]
 
 /-! ### Atomic-bridge helpers
 
@@ -98,7 +110,6 @@ defined by the vector literal `![atoms[0], …, atoms[n-1]]`
 (right-associated `Matrix.vecCons` chain ending in
 `Matrix.vecEmpty`). -/
 private def buildFinValExpr (atoms : Array Expr) : MetaM Expr := do
-  let realTy := Lean.mkConst ``Real
   let n := atoms.size
   -- Tail: `Matrix.vecEmpty : Fin 0 → ℝ`.
   let mut acc : Expr ←
@@ -139,8 +150,7 @@ private def buildAtomicBridgeEq (n : Nat) (φE : Expr) (p : SOS.Poly n)
 /-- Build the `List (CMvPolynomial n ℚ)` expression
 `[g₁.toCMv, …, gₘ.toCMv]`. -/
 private def gsCMvListExpr (n : Nat) (gs : List (SOS.Poly n)) : MetaM Expr := do
-  let cmvTy ← Meta.mkAppOptM ``CPoly.CMvPolynomial
-    #[some (Lean.mkNatLit n), some (Lean.mkConst ``Rat), none]
+  let cmvTy ← cmvType n
   let mut acc ← mkAppOptM ``List.nil #[some cmvTy]
   for g in gs.reverse do
     let gCMv ← toCMvExpr n g
@@ -151,16 +161,15 @@ private def gsCMvListExpr (n : Nat) (gs : List (SOS.Poly n)) : MetaM Expr := do
 per-hypothesis proofs `hAevalProofs i : 0 ≤ aeval x gs[i].toCMv`. -/
 private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
     (hAevalProofs : List Expr) : MetaM Expr := do
-  let cmvTy ← Meta.mkAppOptM ``CPoly.CMvPolynomial
-    #[some (Lean.mkNatLit n), some (Lean.mkConst ``Rat), none]
+  let cmvTy ← cmvType n
   -- predicate: fun g => 0 ≤ aeval x g
   let predicate ← withLocalDeclD `g cmvTy fun gFV => do
     let body ← mkAppM ``LE.le
-      #[(← mkAppOptM ``OfNat.ofNat #[some (Lean.mkConst ``Real),
-          some (Lean.mkNatLit 0), none]),
+      #[(← mkAppOptM ``OfNat.ofNat
+          #[some realTy, some (Lean.mkNatLit 0), none]),
         (← mkAppOptM ``CPoly.CMvPolynomial.aeval
-          #[some (Lean.mkNatLit n), some (Lean.mkConst ``Rat),
-            some (Lean.mkConst ``Real), none, none, none, some xE, some gFV])]
+          #[some (Lean.mkNatLit n), some ratTy, some realTy,
+            none, none, none, some xE, some gFV])]
     mkLambdaFVars #[gFV] body
   let mut accList ← mkAppOptM ``List.nil #[some cmvTy]
   let mut accProof ← mkAppOptM ``List.forall_mem_nil #[some cmvTy, some predicate]
@@ -329,7 +338,7 @@ private def castConstraints (constraints : Array SOS.Reify.ConstraintInfo)
 given the `ε` returned by the search. -/
 private def buildStrictHεProof (εE : Expr) : TacticM Expr := do
   let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
-    #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
+    #[some ratTy, some (Lean.mkNatLit 0), none]), εE]
   let hεE ← buildDecideTrue (← mkEq
     (← mkAppOptM ``Decidable.decide #[some hεType, none])
     (Lean.mkConst ``Bool.true))

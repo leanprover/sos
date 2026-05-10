@@ -13,11 +13,11 @@ elaborator: the AST drives the search and the verifier; the
 original Expr appears in the user-facing goal and must be matched
 syntactically by the bridge.
 
-v0.1 fragment: atoms must be applications of the bound variable
-`x ⟨i, _⟩` for some `Nat`-literal `i < n`, plus rational literals
-and the standard arithmetic constructors `HAdd`, `HSub`, `HMul`,
-`HPow` (with `Nat`-literal exponent), `Neg`, and the rational casts
-into ℝ. Anything else throws an error and the tactic falls through.
+Recognised fragment: rational literals and the standard arithmetic
+constructors `HAdd`, `HSub`, `HMul`, `HPow` (with `Nat`-literal
+exponent), `Neg`, and the rational casts into ℝ. Anything else is
+opacified as an atom (an arbitrary ℝ-typed subterm tracked by index
+in the running `atoms` array).
 -/
 import SOS.Raw
 import SOS.Certificate

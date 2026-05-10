@@ -1,7 +1,7 @@
 name: CI
 
-# Linux-only for v0.1. macOS and Windows mirrors of `kim-em/lean-csdp`'s
-# workflow are deferred to v0.2 once the Linux pipeline is stable.
+# Linux-only. macOS and Windows runners would mirror the BLAS/LAPACK
+# install step from `kim-em/lean-csdp`'s workflow.
 
 on:
   push:
