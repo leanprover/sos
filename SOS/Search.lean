@@ -149,26 +149,21 @@ def blockProduct (block : BlockSpec n) (j k : Nat) : CMvPolynomial n ℚ :=
     CMvPolynomial.monomial (block.basis.getD k (zeroMono n)) (1 : ℚ)
   mj * mk * block.multiplier
 
-/-! ### Constraint monomial set
+/-! ### Cached block products
 
-Collect all monomials appearing in `target` plus all monomials
-appearing in any `block.multiplier · z_b[j] · z_b[k]` polynomial.
-Each such monomial corresponds to one CSDP equality constraint.
--/
+Each `(block, j, k)` triple's `blockProduct` is consumed twice during
+SDP construction: once to collect the union of monomials, and once to
+emit the CSDP `A`-matrix triples. Computing the products and walking
+their supports once is cheaper, especially as block sizes grow. -/
 
-/-- Return the union of supports as a deduplicated list. -/
-def constraintMonomials (target : CMvPolynomial n ℚ)
-    (blocks : Array (BlockSpec n)) : Array (CMvMonomial n) := Id.run do
-  let mut acc : Array (CMvMonomial n) := target.monomials.toArray
-  for block in blocks do
-    let bsize := block.size
-    for j in [0:bsize] do
-      for k in [j:bsize] do
-        let prod := blockProduct block j k
-        for m in prod.monomials do
-          if not (acc.contains m) then
-            acc := acc.push m
-  return acc
+/-- One cached `(block, j, k)` product as its sparse support.
+`support` lists the (monomial, coefficient) pairs with non-zero
+coefficient. -/
+structure CachedProduct (n : Nat) where
+  blockIdx : Nat
+  j        : Nat
+  k        : Nat
+  support  : Array (CMvMonomial n × ℚ)
 
 /-! ### CSDP problem construction -/
 
@@ -187,36 +182,60 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     (useTraceCost : Bool := true) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) :=
   let blocks := buildBlocks target gs
-  let monos := constraintMonomials target blocks
   let blockSizes : Array Int32 := blocks.map fun b => Int32.ofNat b.size
+  -- One pass: cache each blockProduct as its sparse support, accumulate
+  -- the monomial union, and build a (monomial → index) lookup. Both
+  -- the b-vector pass and the aTriples emission below consume `cached`
+  -- and `monoIndex`.
+  let (cached, monos, monoIndex) :
+      Array (CachedProduct n) × Array (CMvMonomial n) ×
+        Std.TreeMap (CMvMonomial n) Nat compare :=
+    Id.run do
+      let mut monos : Array (CMvMonomial n) := #[]
+      let mut monoIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
+      -- Seed with target's monomials so the b-vector lookup
+      -- `target.coeff monos[i]` is non-trivial for any monomial that
+      -- comes from `target` even if no product introduces it.
+      for m in target.monomials do
+        if !monoIndex.contains m then
+          monoIndex := monoIndex.insert m monos.size
+          monos := monos.push m
+      let mut cached : Array (CachedProduct n) := #[]
+      for blockIdx in [0:blocks.size] do
+        let block := blocks[blockIdx]!
+        let bsize := block.size
+        for j in [0:bsize] do
+          for k in [j:bsize] do
+            let prod := blockProduct block j k
+            let mut support : Array (CMvMonomial n × ℚ) := #[]
+            for m in prod.monomials do
+              let c := prod.coeff m
+              if c ≠ 0 then
+                support := support.push (m, c)
+                if !monoIndex.contains m then
+                  monoIndex := monoIndex.insert m monos.size
+                  monos := monos.push m
+            cached := cached.push { blockIdx, j, k, support }
+      return (cached, monos, monoIndex)
   let b : Array Float := monos.map fun m => ratToFloat (target.coeff m)
-  -- For each (constraint = monoIdx, block = blockIdx, j, k), append a
-  -- ConstraintTriple if z_b[j]·z_b[k]·g_b has nonzero coef of monos[monoIdx].
+  -- For each cached product (block, j, k), emit one ConstraintTriple
+  -- per non-zero monomial coefficient. CSDP mirrors the upper-triangle
+  -- of each `A_i` to the lower triangle and computes
+  -- `tr(A_i · X) = Σⱼₖ Aⱼₖ Xⱼₖ` on the resulting symmetric matrix; for
+  -- symmetric `X` that expands to `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ`. We
+  -- want `target.coef(m) = Σⱼ cⱼⱼ Mⱼⱼ + 2 Σⱼ<k cⱼₖ Mⱼₖ` where
+  -- `cⱼₖ = coef(m in zⱼ·zₖ·g_b)`, so `Aⱼⱼ = cⱼⱼ`, `Aⱼₖ = cⱼₖ`.
   let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
     let mut acc : Array LeanCsdp.ConstraintTriple := #[]
-    for blockIdx in [0:blocks.size] do
-      let block := blocks[blockIdx]!
-      let bsize := block.size
-      for j in [0:bsize] do
-        for k in [j:bsize] do
-          let prod := blockProduct block j k
-          for monoIdx in [0:monos.size] do
-            let m := monos[monoIdx]!
-            let c := prod.coeff m
-            if c ≠ 0 then
-              -- CSDP mirrors the upper-triangle of each `A_i` to the
-              -- lower triangle and computes `tr(A_i · X) = Σⱼₖ Aⱼₖ Xⱼₖ`
-              -- on the resulting symmetric matrix. For a symmetric `X`
-              -- this expands to `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ`. We want
-              -- `target.coef(m) = Σⱼ cⱼⱼ Mⱼⱼ + 2 Σⱼ<k cⱼₖ Mⱼₖ` where
-              -- `cⱼₖ = coef(m in zⱼ·zₖ)`, so `Aⱼⱼ = cⱼⱼ`, `Aⱼₖ = cⱼₖ`.
-              let val : ℚ := c
-              acc := acc.push
-                { constraint := UInt32.ofNat (monoIdx + 1)
-                  block := UInt32.ofNat (blockIdx + 1)
-                  row := UInt32.ofNat (j + 1)
-                  col := UInt32.ofNat (k + 1)
-                  value := ratToFloat val }
+    for cp in cached do
+      for (m, c) in cp.support do
+        let monoIdx := monoIndex[m]!
+        acc := acc.push
+          { constraint := UInt32.ofNat (monoIdx + 1)
+            block := UInt32.ofNat (cp.blockIdx + 1)
+            row := UInt32.ofNat (cp.j + 1)
+            col := UInt32.ofNat (cp.k + 1)
+            value := ratToFloat c }
     return acc
   -- Cost matrix: minimise `tr(X) = Σ_b Σ_j M_b[j,j]`. CSDP minimises
   -- `tr(C·X)`, so populating `c` with `(b, j, j, 1.0)` for every block
