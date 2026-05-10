@@ -254,6 +254,36 @@ example : 0 ≤ (x 0)^2 + 1 := by
 
 end Case4
 
+/-! ### `reifyRaw` smoke checks (Task 1) -/
+
+section ReifySmoke
+
+open Lean Meta Elab Term Sos.Reify
+
+/-- Round-trip: reify `x^2 + 2*x*y + y^2` (elaborated from Lean
+syntax so the `2` is canonical) and check we get `maxAtomBound = 2`
+and atom array is `[x, y]`. -/
+elab "#sos_reify_smoke" : command => do
+  Lean.Elab.Command.runTermElabM fun _ => do
+    withLocalDeclD `x (Lean.mkConst ``Real) fun xE => do
+      withLocalDeclD `y (Lean.mkConst ``Real) fun yE => do
+        let stx ← `(($(← xE.toSyntax))^2 + 2 * $(← xE.toSyntax) * $(← yE.toSyntax)
+          + ($(← yE.toSyntax))^2)
+        let e ← Term.elabTermAndSynthesize stx (some (Lean.mkConst ``Real))
+        let (raw, atoms) ← (reifyRaw e).go
+        IO.println s!"reify maxAtomBound = {raw.maxAtomBound}, n_atoms = {atoms.size}"
+        for i in [:atoms.size] do
+          IO.println s!"  atom[{i}] = {← Meta.ppExpr atoms[i]!}"
+        IO.println s!"raw repr: {repr raw}"
+        unless raw.maxAtomBound = 2 do
+          throwError "expected maxAtomBound = 2, got {raw.maxAtomBound}"
+        unless atoms.size = 2 do
+          throwError "expected n_atoms = 2, got {atoms.size}"
+
+#sos_reify_smoke
+
+end ReifySmoke
+
 /-! ### Inline atomVal: validates the production-shape bridge
 
 The production elaborator builds `atomVal` programmatically as a
