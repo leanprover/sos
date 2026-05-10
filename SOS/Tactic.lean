@@ -187,47 +187,42 @@ Builds `0 ≤ aeval φ g_i.toCMv` from the parser's hypothesis FVars,
 dispatching on `ConstraintKind`. -/
 
 /-- Build per-hypothesis bridged proofs `0 ≤ aeval φ g_i.toCMv` from
-the ParsedGoal's hFVars, using `aeval_nonneg_of_orig` (or
-`_neg` for `.nonpos`). -/
+the ParsedGoal's constraints, using `aeval_nonneg_of_orig` (or
+`_neg` for `.nonpos`, or `le_of_lt` lifting for `.pos`). -/
 private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
-    (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
-    (gsKinds : List SOS.Reify.ConstraintKind) (hFVars : Array FVarId) :
+    (constraints : Array SOS.Reify.ConstraintInfo) :
     TacticM (List Expr × List (SOS.Poly n)) := do
   let nE := Lean.mkNatLit n
-  let mut acc : Array Expr := Array.mkEmpty rawGs.length
-  let mut polys : Array (SOS.Poly n) := Array.mkEmpty rawGs.length
-  for i in [:rawGs.length] do
-    let raw := rawGs[i]!
-    let some gTree := castRawToPoly raw n |
+  let mut acc : Array Expr := Array.mkEmpty constraints.size
+  let mut polys : Array (SOS.Poly n) := Array.mkEmpty constraints.size
+  for c in constraints do
+    let some gTree := castRawToPoly c.raw n |
       throwError "sos: constraint poly's maxAtomBound exceeds n = {n}"
-    let origExpr := origGs[i]!
-    let kind := gsKinds[i]!
-    let hFVar := hFVars[i]!
-    let hExpr := Lean.mkFVar hFVar
+    let hExpr := Lean.mkFVar c.fvar
     let gE := Lean.toExpr gTree
     polys := polys.push gTree
-    match kind with
+    match c.kind with
     | .nonneg =>
-      let eqProof ← buildAtomicBridgeEq n φE gTree origExpr
+      let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
-        #[some nE, some φE, some gE, some origExpr,
+        #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hExpr]
       acc := acc.push aProof
     | .nonpos =>
-      -- gTree's evalReal yields `-origExpr` because the reifier
-      -- already wrapped the orig poly in `Raw.neg`.
-      let negOrig ← mkAppM ``Neg.neg #[origExpr]
+      -- gTree's evalReal yields `-orig` because the reifier already
+      -- wrapped the orig poly in `Raw.neg`.
+      let negOrig ← mkAppM ``Neg.neg #[c.orig]
       let eqProof ← buildAtomicBridgeEq n φE gTree negOrig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig_neg
-        #[some nE, some φE, some gE, some origExpr,
+        #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hExpr]
       acc := acc.push aProof
     | .pos =>
-      -- Hypothesis is `0 < origExpr`; promote to `0 ≤ origExpr`.
+      -- Hypothesis is `0 < orig`; promote to `0 ≤ orig`.
       let hLeExpr ← mkAppM ``le_of_lt #[hExpr]
-      let eqProof ← buildAtomicBridgeEq n φE gTree origExpr
+      let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
-        #[some nE, some φE, some gE, some origExpr,
+        #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hLeExpr]
       acc := acc.push aProof
   return (acc.toList, polys.toList)
@@ -251,8 +246,8 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
   let nE := Lean.mkNatLit n
   let mv ← Tactic.getMainGoal
   let φE ← buildFinValExpr parsed.atoms
-  let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
-    parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
+  let (hAevalProofs, gPolys) ←
+    buildHypothesisAevalProofsA n φE parsed.constraints
   let gsListE ← gsCMvListExpr n gPolys
   let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
   -- Closed and strict need the conclusion polynomial; infeasible doesn't.
@@ -260,14 +255,12 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
     match mode with
     | .infeasible => pure none
     | .closed | .strict .. =>
-      let some rawConcl := parsed.rawConcl |
-        throwError "sos: missing rawConcl"
-      let some origConcl := parsed.origConcl |
-        throwError "sos: missing origConcl"
-      let some pTree := castRawToPoly rawConcl n |
+      let some concl := parsed.concl |
+        throwError "sos: missing concl"
+      let some pTree := castRawToPoly concl.raw n |
         throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
       let pCMv ← toCMvExpr n pTree
-      pure (some (pTree, pCMv, origConcl))
+      pure (some (pTree, pCMv, concl.orig))
   let goalE ← match mode, pData? with
     | .closed, some (_, pCMv, _) =>
       mkAppOptM ``SOS.Goal.closed #[some nE, some pCMv]
@@ -306,6 +299,7 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
 /-! ### Tactic surface -/
 
 syntax (name := sosTactic) "sos" : tactic
+syntax (name := sosTryTactic) "sos?" : tactic
 syntax (name := sosWitnessTactic) "sos_witness " term : tactic
 
 /-- Build a `SOS.Certificate n` Expr from a runtime `Certificate n`,
@@ -321,59 +315,25 @@ private def certExprOfRuntime (n : Nat) (cert : SOS.Certificate n) : MetaM Expr 
   mkAppOptM ``SOS.Certificate.fromDecompiled
     #[some (Lean.mkNatLit n), some sigma0E, some sigmasE]
 
-/-- Helper: cast rawGs to typed Poly n. -/
-private def castGs (rawGs : List SOS.Poly.Raw) (n : Nat) :
-    TacticM (List (SOS.Poly n)) := do
-  let mut acc : Array (SOS.Poly n) := Array.mkEmpty rawGs.length
-  for raw in rawGs do
-    let some gT := castRawToPoly raw n |
+/-- Cast each constraint's `Raw` to the typed `Poly n`. -/
+private def castConstraints (constraints : Array SOS.Reify.ConstraintInfo)
+    (n : Nat) : TacticM (List (SOS.Poly n)) := do
+  let mut acc : Array (SOS.Poly n) := Array.mkEmpty constraints.size
+  for c in constraints do
+    let some gT := castRawToPoly c.raw n |
       throwError "sos: constraint poly's maxAtomBound > n = {n}"
     acc := acc.push gT
   return acc.toList
 
-elab_rules : tactic
-  | `(tactic| sos) => do
-    let some parsed ← SOS.Reify.parseGoalAtomic |
-      throwError "sos: goal not in supported fragment"
-    let n := parsed.atoms.size
-    let gPolys ← castGs parsed.rawGs n
-    let gsCMv := gPolys.map SOS.Poly.toCMv
-    match parsed.shape with
-    | .closed =>
-      let some rawConcl := parsed.rawConcl |
-        throwError "sos (closed): missing rawConcl"
-      let some pTree := castRawToPoly rawConcl n |
-        throwError "sos: conclusion's maxAtomBound > n = {n}"
-      let goal : SOS.Goal n := .closed pTree.toCMv
-      match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
-      | none => throwError "sos: search failed to find a certificate"
-      | some cert =>
-        let certE ← certExprOfRuntime n cert
-        closeSos parsed certE .closed
-    | .infeasible =>
-      let goal : SOS.Goal n := .infeasible
-      match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
-      | none => throwError "sos: search failed to find an infeasibility certificate"
-      | some cert =>
-        let certE ← certExprOfRuntime n cert
-        closeSos parsed certE .infeasible
-    | .strict =>
-      let some rawConcl := parsed.rawConcl |
-        throwError "sos (strict): missing rawConcl"
-      let some pTree := castRawToPoly rawConcl n |
-        throwError "sos: conclusion's maxAtomBound > n = {n}"
-      match (← (SOS.Search.runStrictSearch pTree.toCMv gsCMv : IO _)) with
-      | none => throwError "sos: search failed to find a strict-positivity certificate"
-      | some res =>
-        let certE ← certExprOfRuntime n res.cert
-        let εE := Lean.toExpr res.ε
-        let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
-          #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
-        let hεE ← buildDecideTrue (← mkEq
-          (← mkAppOptM ``Decidable.decide #[some hεType, none])
-          (Lean.mkConst ``Bool.true))
-        let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
-        closeSos parsed certE (.strict εE hεProof)
+/-- Build the `LT.lt 0 ε` proof needed by `closeSos (.strict εE hεE)`,
+given the `ε` returned by the search. -/
+private def buildStrictHεProof (εE : Expr) : TacticM Expr := do
+  let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
+    #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
+  let hεE ← buildDecideTrue (← mkEq
+    (← mkAppOptM ``Decidable.decide #[some hεType, none])
+    (Lean.mkConst ``Bool.true))
+  mkAppM ``of_decide_eq_true #[hεE]
 
 /-! ### `sos?` — Try-this suggestion for the inline witness form
 
@@ -448,8 +408,6 @@ private def formatCertificate {n : Nat} (cert : SOS.Certificate n) : String :=
   s!"\{ sigma0 := \{ squares := {formatSquares σ₀_decomp} }, \
      sigmas := {formatSigmasList σᵢ_decomp} }"
 
-syntax (name := sosTryTactic) "sos?" : tactic
-
 /-- Emit the `Try this:` suggestion for a found certificate. -/
 private def emitSosSuggestion (tk : Syntax) (certText : String) : TacticM Unit := do
   let suggestion : String := s!"sos_witness {certText}"
@@ -459,52 +417,58 @@ private def emitSosSuggestion (tk : Syntax) (certText : String) : TacticM Unit :
   | .error err =>
     throwError "sos?: failed to parse suggestion as tactic syntax: {err}"
 
+/-- The shared body of `sos` and `sos?`. Runs search for the parsed
+goal, optionally emits a `Try this:` suggestion at `suggest?`, and
+closes the goal with the resulting certificate. The error-message
+prefix (`"sos"` vs `"sos?"`) is taken from `tag`. -/
+private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
+    (suggest? : Option Syntax) (tag : String) : TacticM Unit := do
+  let n := parsed.atoms.size
+  let gPolys ← castConstraints parsed.constraints n
+  let gsCMv := gPolys.map SOS.Poly.toCMv
+  let withFoundCert (cert : SOS.Certificate n)
+      (mode : CloseMode) : TacticM Unit := do
+    if let some tk := suggest? then
+      emitSosSuggestion tk (formatCertificate cert)
+    let certE ← certExprOfRuntime n cert
+    closeSos parsed certE mode
+  match parsed.shape with
+  | .closed =>
+    let some concl := parsed.concl |
+      throwError "{tag} (closed): missing concl"
+    let some pTree := castRawToPoly concl.raw n |
+      throwError "{tag}: conclusion's maxAtomBound > n = {n}"
+    let goal : SOS.Goal n := .closed pTree.toCMv
+    match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
+    | none => throwError "{tag}: search failed to find a certificate"
+    | some cert => withFoundCert cert .closed
+  | .infeasible =>
+    match (← (SOS.Search.runSearch .infeasible gsCMv : IO _)) with
+    | none => throwError "{tag}: search failed to find an infeasibility certificate"
+    | some cert => withFoundCert cert .infeasible
+  | .strict =>
+    let some concl := parsed.concl |
+      throwError "{tag} (strict): missing concl"
+    let some pTree := castRawToPoly concl.raw n |
+      throwError "{tag}: conclusion's maxAtomBound > n = {n}"
+    match (← (SOS.Search.runStrictSearch pTree.toCMv gsCMv : IO _)) with
+    | none => throwError "{tag}: search failed to find a strict-positivity certificate"
+    | some res =>
+      let εE := Lean.toExpr res.ε
+      let hεProof ← buildStrictHεProof εE
+      withFoundCert res.cert (.strict εE hεProof)
+
+elab_rules : tactic
+  | `(tactic| sos) => do
+    let some parsed ← SOS.Reify.parseGoalAtomic |
+      throwError "sos: goal not in supported fragment"
+    runSosTactic parsed none "sos"
+
 elab_rules : tactic
   | `(tactic| sos?%$tk) => do
     let some parsed ← SOS.Reify.parseGoalAtomic |
       throwError "sos?: goal not in supported fragment"
-    let n := parsed.atoms.size
-    let gPolys ← castGs parsed.rawGs n
-    let gsCMv := gPolys.map SOS.Poly.toCMv
-    match parsed.shape with
-    | .closed =>
-      let some rawConcl := parsed.rawConcl |
-        throwError "sos? (closed): missing rawConcl"
-      let some pTree := castRawToPoly rawConcl n |
-        throwError "sos?: conclusion's maxAtomBound > n = {n}"
-      let goal : SOS.Goal n := .closed pTree.toCMv
-      match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
-      | none => throwError "sos?: search failed to find a certificate"
-      | some cert =>
-        emitSosSuggestion tk (formatCertificate cert)
-        let certE ← certExprOfRuntime n cert
-        closeSos parsed certE .closed
-    | .infeasible =>
-      let goal : SOS.Goal n := .infeasible
-      match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
-      | none => throwError "sos?: search failed to find an infeasibility certificate"
-      | some cert =>
-        emitSosSuggestion tk (formatCertificate cert)
-        let certE ← certExprOfRuntime n cert
-        closeSos parsed certE .infeasible
-    | .strict =>
-      let some rawConcl := parsed.rawConcl |
-        throwError "sos? (strict): missing rawConcl"
-      let some pTree := castRawToPoly rawConcl n |
-        throwError "sos?: conclusion's maxAtomBound > n = {n}"
-      match (← (SOS.Search.runStrictSearch pTree.toCMv gsCMv : IO _)) with
-      | none => throwError "sos?: search failed to find a strict-positivity certificate"
-      | some res =>
-        emitSosSuggestion tk (formatCertificate res.cert)
-        let certE ← certExprOfRuntime n res.cert
-        let εE := Lean.toExpr res.ε
-        let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
-          #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
-        let hεE ← buildDecideTrue (← mkEq
-          (← mkAppOptM ``Decidable.decide #[some hεType, none])
-          (Lean.mkConst ``Bool.true))
-        let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
-        closeSos parsed certE (.strict εE hεProof)
+    runSosTactic parsed (some tk) "sos?"
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do
