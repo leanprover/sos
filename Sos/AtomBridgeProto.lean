@@ -331,6 +331,18 @@ example : ∀ x : ℝ, 0 ≤ x → 0 ≤ x^3 + x := by
 
 end ParserSmoke
 
+/-! ### End-to-end via the production `sos` tactic on natural form -/
+
+section ProductionEndToEnd
+
+example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
+example (x y : ℝ) : 0 ≤ x^2 + 2*x*y + y^2 := by sos
+example (x : ℝ) : 0 < x^2 + 1 := by sos
+example (x : ℝ) (h : 0 ≤ x) : 0 ≤ x^3 + x := by sos
+example : ∀ x : ℝ, 0 ≤ x^2 + 1 := by sos
+
+end ProductionEndToEnd
+
 /-! ### Inline atomVal: validates the production-shape bridge
 
 The production elaborator builds `atomVal` programmatically as a
