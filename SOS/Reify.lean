@@ -106,12 +106,6 @@ structure ReifyState where
 /-- Reifier monad: state-tracking over `MetaM`. -/
 abbrev ReifyM := StateRefT ReifyState MetaM
 
-/-- Run a `ReifyM` action with an empty atom array. Returns the action's
-result alongside the final atom array. -/
-def ReifyM.go {α} (act : ReifyM α) : MetaM (α × Array Expr) := do
-  let (a, st) ← StateRefT'.run act ({} : ReifyState)
-  return (a, st.atoms)
-
 /-- Run a `ReifyM` action against a pre-existing atom array (so atoms
 across multiple reifies share indices). -/
 def ReifyM.goWith {α} (atoms : Array Expr) (act : ReifyM α) :

@@ -157,8 +157,6 @@ appearing in any `block.multiplier · z_b[j] · z_b[k]` polynomial.
 Each such monomial corresponds to one CSDP equality constraint.
 -/
 
-private def monoBeq (a b : CMvMonomial n) : Bool := a == b
-
 /-- Return the union of supports as a deduplicated list. -/
 def constraintMonomials (target : CMvPolynomial n ℚ)
     (blocks : Array (BlockSpec n)) : Array (CMvMonomial n) := Id.run do
@@ -316,10 +314,9 @@ def basisAsPolys (basis : Array (CMvMonomial n)) :
 
 /-- Try one denominator: round Gram matrices, reconstruct via LDL,
 build a Certificate, check it. Returns `none` if any step fails. -/
-def tryDenominator (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
+def tryDenominator (gs : List (CMvPolynomial n ℚ))
     (blocks : Array (BlockSpec n)) (sol : LeanCsdp.Solution) (denom : ℚ)
     (goal : Goal n) : Option (Certificate n) := Id.run do
-  let _ := target  -- silence unused (used implicitly via goal/gs in checks)
   let Qs := decodeSolution sol denom
   if Qs.size ≠ blocks.size then return none
   -- Reconstruct σ₀ from block 0.
@@ -358,7 +355,7 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
   if sol.ret ∉ [0, 3] then
     return none
   for d in niceDenominators do
-    if let some cert := tryDenominator target gs blocks sol d goal then
+    if let some cert := tryDenominator gs blocks sol d goal then
       return some cert
   return none
 
@@ -417,16 +414,14 @@ def runStrictSearch (p : CMvPolynomial n ℚ)
       | none => pure ()
   return none
 
-/-- Top-level search driver. Dispatches on the goal shape. -/
+/-- Closed/infeasibility search dispatcher. Owns the `Goal → target`
+translation (`p` for `.closed`, `-1` for `.infeasible`). Strict
+positivity has its own entry point: `runStrictSearch`. -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
     IO (Option (Certificate n)) := do
   match goal with
-  | .closed p     => runFeasibilitySearch p gs goal
-  | .infeasible   => runFeasibilitySearch (-1) gs goal
-  | .strict _ _ _ =>
-    -- The strict case yields both a certificate and an ε. Callers that
-    -- only want the certificate (e.g. to exercise the verifier) should
-    -- use `runStrictSearch`. Here we drop the ε.
-    return none
+  | .closed p   => runFeasibilitySearch p gs goal
+  | .infeasible => runFeasibilitySearch (-1) gs goal
+  | .strict ..  => panic! "runSearch: strict goals must use runStrictSearch"
 
 end SOS.Search
