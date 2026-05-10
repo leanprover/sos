@@ -6,11 +6,10 @@ SDP encoding (CompPoly polynomials → `LeanCsdp.Problem`), rational
 rounding of the float Gram-matrix solution, and the top-level
 `runSearch` driver.
 
-**v0.1 scope.** Closed positivity (`Goal.closed p`) and infeasibility
-(`Goal.infeasible`) are implemented end-to-end. Strict positivity
-(`Goal.strict p ε hε`) is deferred — the LP-slack-maximisation
-encoding adds a separate code path that's not needed for v0.1's
-example set.
+Closed positivity and infeasibility go through the feasibility SDP
+(`runFeasibilitySearch`); strict positivity reuses it via an ε-schedule
+(`runStrictSearch`). The proper LP-slack-maximisation encoding for
+strict goals is not implemented.
 
 **Encoding (Putinar form).** For a target polynomial `t` (= `p` for
 closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
@@ -352,6 +351,10 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
     else
       return none
   let sol := LeanCsdp.solve problem
+  -- CSDP return codes (from CSDP user manual §7): 0 = optimal solution
+  -- found, 3 = stuck at edge of primal feasibility (still usually a
+  -- usable rounding target). Anything else (1 = infeasible, 2 = dual
+  -- infeasible, 4 = max iterations, …) gives up on this encoding.
   if sol.ret ∉ [0, 3] then
     return none
   for d in niceDenominators do
