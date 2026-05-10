@@ -141,14 +141,13 @@ def fourSquaresRat (r : ℚ) : Option (List ℚ) := Id.run do
 
 /-! ### Reconstruction: Gram matrix → list of polynomial squares -/
 
-/-- Compute `Lᵀ · z`, returned as a `List` (avoids the need for an
-`Inhabited (CMvPolynomial …)` instance for `Array.replicate`). The
-result has length `ldl.n`; element `i` is `Σ_k L[k,i] · z[k]`. -/
+/-- Compute `Lᵀ · z`. The result has length `ldl.n`; element `i` is
+`Σ_k L[k,i] · z[k]`. -/
 def transposeMulBasis {nVar : Nat} (ldl : LDLT)
     (basis : Array (CMvPolynomial nVar ℚ)) :
-    List (CMvPolynomial nVar ℚ) := Id.run do
+    Array (CMvPolynomial nVar ℚ) := Id.run do
   let n := ldl.n
-  let mut w : List (CMvPolynomial nVar ℚ) := []
+  let mut w : Array (CMvPolynomial nVar ℚ) := Array.mkEmpty n
   for i in [0:n] do
     let mut acc : CMvPolynomial nVar ℚ := CMvPolynomial.C 0
     for k in [0:n] do
@@ -156,7 +155,7 @@ def transposeMulBasis {nVar : Nat} (ldl : LDLT)
       if lki ≠ 0 then
         let bk := basis.getD k (CMvPolynomial.C 0)
         acc := acc + CMvPolynomial.C lki * bk
-    w := w ++ [acc]
+    w := w.push acc
   return w
 
 /-- Given a PSD rational matrix `Q` and a basis polynomial vector `z`,
@@ -168,16 +167,16 @@ def reconstruct {nVar : Nat} (n : Nat) (Q : Array ℚ)
   | none => return none
   | some ldl =>
     let w := transposeMulBasis ldl basis
-    let mut squares : List (CMvPolynomial nVar ℚ) := []
+    let mut squares : Array (CMvPolynomial nVar ℚ) := #[]
     for i in [0:n] do
       let Di := ldl.D[i]!
-      let wi : CMvPolynomial nVar ℚ := (w[i]?).getD (CMvPolynomial.C 0)
+      let wi : CMvPolynomial nVar ℚ := w[i]?.getD (CMvPolynomial.C 0)
       match fourSquaresRat Di with
       | none => return none
       | some coeffs =>
         for c in coeffs do
           if c ≠ 0 then
-            squares := squares ++ [CMvPolynomial.C c * wi]
-    return some squares
+            squares := squares.push (CMvPolynomial.C c * wi)
+    return some squares.toList
 
 end SOS.LDL

@@ -325,16 +325,16 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
     LDL.reconstruct block0.size (Qs.getD 0 #[]) (basisAsPolys block0.basis)
     | return none
   -- Reconstruct each σᵢ from block i+1.
-  let mut sigmas : List (SOSDecomp n) := []
+  let mut sigmas : Array (SOSDecomp n) := Array.mkEmpty (blocks.size - 1)
   for blockIdx in [1:blocks.size] do
     let block := blocks.getD blockIdx default
     let Q := Qs.getD blockIdx #[]
     let some sigmaSquares :=
       LDL.reconstruct block.size Q (basisAsPolys block.basis)
       | return none
-    sigmas := sigmas ++ [{ squares := sigmaSquares }]
+    sigmas := sigmas.push { squares := sigmaSquares }
   let cert : Certificate n :=
-    { sigma0 := { squares := sigma0Squares }, sigmas := sigmas }
+    { sigma0 := { squares := sigma0Squares }, sigmas := sigmas.toList }
   if cert.checks goal gs then return some cert
   return none
 
