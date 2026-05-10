@@ -284,6 +284,53 @@ elab "#sos_reify_smoke" : command => do
 
 end ReifySmoke
 
+/-! ### `parseGoalAtomic` smoke checks (Task 2) -/
+
+section ParserSmoke
+
+open Lean Elab Tactic Sos.Reify
+
+/-- A throwaway tactic that runs `parseGoalAtomic`, prints the
+result, and then aborts (so the goal isn't consumed). -/
+elab "sos_parse_dump" : tactic => do
+  match ← parseGoalAtomic with
+  | none => Lean.logInfo "parseGoalAtomic: none"
+  | some pg =>
+    Lean.logInfo m!"parseGoalAtomic OK: \
+      n_atoms={pg.atoms.size}, shape={repr pg.shape}, \
+      n_gs={pg.rawGs.length}, n_hFVars={pg.hFVars.size}\n\
+      atoms: {pg.atoms}\n\
+      rawConcl: {repr pg.rawConcl}\n\
+      rawGs: {repr pg.rawGs}"
+  -- Avoid "unused tactic" — leave the goal as-is.
+  -- The caller dispatches the real proof.
+
+example (x : ℝ) : 0 ≤ x^2 + 1 := by
+  sos_parse_dump
+  sorry
+
+example (x y : ℝ) : 0 ≤ x^2 + 2*x*y + y^2 := by
+  sos_parse_dump
+  sorry
+
+example (x : ℝ) (h : 0 ≤ x) : 0 ≤ x^3 + x := by
+  sos_parse_dump
+  sorry
+
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by
+  sos_parse_dump
+  sorry
+
+example : ∀ x : ℝ, 0 ≤ x^2 + 1 := by
+  sos_parse_dump
+  sorry
+
+example : ∀ x : ℝ, 0 ≤ x → 0 ≤ x^3 + x := by
+  sos_parse_dump
+  sorry
+
+end ParserSmoke
+
 /-! ### Inline atomVal: validates the production-shape bridge
 
 The production elaborator builds `atomVal` programmatically as a
