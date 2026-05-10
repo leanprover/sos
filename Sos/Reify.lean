@@ -126,7 +126,88 @@ partial def ratLit? (e : Expr) : MetaM (Option ℚ) := do
     return some (-(n + 1) : ℚ)
   | _ => return none
 
-/-! ### Atom recognition -/
+/-! ### Atom-collection monad
+
+The new design treats the reifier as a `Nat → ℝ`-indexed walker that
+accumulates atoms (arbitrary `ℝ`-typed subterms it doesn't recognise
+as ring operators or rational literals) into a state array. The
+output is a `Sos.Poly.Raw` whose `.var i` references atom `i` in the
+final array.
+
+Atom identity uses `withTransparency .reducible` plus pre-normalisation
+(`whnfR` + zeta + beta) before the `isDefEq` check, so e.g. `(fun a =>
+a) x` collapses with `x` but `f x` and `f y` (distinct FVars) do not. -/
+
+/-- Reifier state: the running atom array. -/
+structure ReifyState where
+  atoms : Array Expr := #[]
+
+/-- Reifier monad: state-tracking over `MetaM`. -/
+abbrev ReifyM := StateRefT ReifyState MetaM
+
+/-- Run a `ReifyM` action with an empty atom array. Returns the action's
+result alongside the final atom array. -/
+def ReifyM.go {α} (act : ReifyM α) : MetaM (α × Array Expr) := do
+  let (a, st) ← StateRefT'.run act ({} : ReifyState)
+  return (a, st.atoms)
+
+/-- Run a `ReifyM` action against a pre-existing atom array (so atoms
+across multiple reifies share indices). -/
+def ReifyM.goWith {α} (atoms : Array Expr) (act : ReifyM α) :
+    MetaM (α × Array Expr) := do
+  let (a, st) ← StateRefT'.run act ({ atoms } : ReifyState)
+  return (a, st.atoms)
+
+/-- Look up `e` in the atom array, deduplicating by `isDefEq` at
+`reducible` transparency. Returns the index. -/
+def addAtom (e : Expr) : ReifyM Nat := do
+  let st ← get
+  -- Normalise the candidate atom for stable deduplication. `whnfR`
+  -- handles `reducible` definitions, beta, and zeta-reduction of let
+  -- bindings; this is what `ring`'s atom collector does.
+  let eNorm ← liftM (m := MetaM) (whnfR e)
+  for i in [:st.atoms.size] do
+    let a := st.atoms[i]!
+    let aNorm ← liftM (m := MetaM) (whnfR a)
+    if ← liftM (m := MetaM) (Meta.withTransparency .reducible (Meta.isDefEq eNorm aNorm)) then
+      return i
+  let n := st.atoms.size
+  set { st with atoms := st.atoms.push e }
+  return n
+
+/-! ### Raw-AST reifier -/
+
+/-- Walk an `Expr` of type `ℝ`, accumulating atoms and producing an
+untyped `Sos.Poly.Raw`. Recognises:
+
+  * Rational literals via `ratLit?`.
+  * `HAdd`, `HSub`, `HMul` over ℝ.
+  * `HPow` with a `Nat`-literal exponent.
+  * `Neg`.
+
+Anything else becomes an atom via `addAtom`. -/
+partial def reifyRaw (e : Expr) : ReifyM Sos.Poly.Raw := do
+  let e ← liftM (m := MetaM) (whnfR e)
+  if let some r ← liftM (m := MetaM) (ratLit? e) then
+    return Sos.Poly.Raw.const r
+  match_expr e with
+  | HAdd.hAdd _ _ _ _ a b =>
+    return Sos.Poly.Raw.add (← reifyRaw a) (← reifyRaw b)
+  | HSub.hSub _ _ _ _ a b =>
+    return Sos.Poly.Raw.sub (← reifyRaw a) (← reifyRaw b)
+  | HMul.hMul _ _ _ _ a b =>
+    return Sos.Poly.Raw.mul (← reifyRaw a) (← reifyRaw b)
+  | HPow.hPow _ _ _ _ a k =>
+    if let some kNat ← liftM (m := MetaM) (natLit? k) then
+      return Sos.Poly.Raw.pow (← reifyRaw a) kNat
+    -- Non-literal exponent: opacify the whole pow expression.
+    return Sos.Poly.Raw.var (← addAtom e)
+  | Neg.neg _ _ a =>
+    return Sos.Poly.Raw.neg (← reifyRaw a)
+  | _ =>
+    return Sos.Poly.Raw.var (← addAtom e)
+
+/-! ### Legacy atom recognition (`Fin n → ℝ` form) -/
 
 /-- Match `e = xFVar i` where `i` is a `Fin n` value (literal or `Fin.mk`).
 Returns `i`'s `Nat` value if matched. -/
