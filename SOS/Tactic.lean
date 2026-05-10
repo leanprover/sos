@@ -232,92 +232,75 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       acc := acc.push aProof
   return (acc.toList, polys.toList)
 
-/-- Closed-positivity close. -/
-def closeClosedSosA (parsed : SOS.Reify.ParsedGoal)
-    (certE : Expr) : TacticM Unit := Tactic.withMainContext do
-  let some rawConcl := parsed.rawConcl |
-    throwError "sos (closed): missing rawConcl"
-  let some origConcl := parsed.origConcl |
-    throwError "sos (closed): missing origConcl"
-  let n := parsed.atoms.size
-  let some pTree := castRawToPoly rawConcl n |
-    throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
-  let mv ← Tactic.getMainGoal
-  let φE ← buildFinValExpr parsed.atoms
-  let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
-    parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
-  let gsListE ← gsCMvListExpr n gPolys
-  let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
-  let pCMv ← toCMvExpr n pTree
-  let goalE ← mkAppOptM ``SOS.Goal.closed
-    #[some (Lean.mkNatLit n), some pCMv]
-  let checksE ← mkAppM ``SOS.Certificate.checks #[certE, goalE, gsListE]
-  let trueE ← mkAppOptM ``Bool.true #[]
-  let decType ← mkEq checksE trueE
-  let decProof ← buildDecideTrue decType
-  let hTarget ← mkAppM ``SOS.sos_sound
-    #[pCMv, gsListE, certE, decProof, φE, hgsProof]
-  let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
-  let pE := Lean.toExpr pTree
-  let final ← mkAppOptM ``SOS.nonneg_orig_of_aeval
-    #[some (Lean.mkNatLit n), some φE, some pE, some origConcl,
-      some eqProof_p, some hTarget]
-  mv.assign final
-  Tactic.replaceMainGoal []
+/-- The shape-specific data the unified close needs: which `Goal`
+constructor to invoke, which soundness lemma, and (for closed/strict)
+how to bridge the resulting `0 ≤ aeval …` / `0 < aeval …` proof back
+to the user's original `0 ≤ origExpr` / `0 < origExpr` goal.
+Infeasibility's conclusion is `False`, so it skips the bridge. -/
+inductive CloseMode where
+  | closed
+  | strict (εE : Expr) (hεE : Expr)
+  | infeasible
 
-/-- Strict-positivity close. -/
-def closeStrictSosA (parsed : SOS.Reify.ParsedGoal)
-    (certE : Expr) (εE : Expr) (hεE : Expr) : TacticM Unit :=
-    Tactic.withMainContext do
-  let some rawConcl := parsed.rawConcl |
-    throwError "sos (strict): missing rawConcl"
-  let some origConcl := parsed.origConcl |
-    throwError "sos (strict): missing origConcl"
+/-- Unified close: builds `decide`-checked soundness application for
+the closed / strict / infeasible certificate and assigns the main goal.
+Mode-specific differences are tabulated in `CloseMode`. -/
+def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
+    (mode : CloseMode) : TacticM Unit := Tactic.withMainContext do
   let n := parsed.atoms.size
-  let some pTree := castRawToPoly rawConcl n |
-    throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
+  let nE := Lean.mkNatLit n
   let mv ← Tactic.getMainGoal
   let φE ← buildFinValExpr parsed.atoms
   let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
     parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
   let gsListE ← gsCMvListExpr n gPolys
   let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
-  let pCMv ← toCMvExpr n pTree
-  let goalE ← mkAppOptM ``SOS.Goal.strict
-    #[some (Lean.mkNatLit n), some pCMv, some εE, some hεE]
+  -- Closed and strict need the conclusion polynomial; infeasible doesn't.
+  let pData? : Option (SOS.Poly n × Expr × Expr) ← do
+    match mode with
+    | .infeasible => pure none
+    | .closed | .strict .. =>
+      let some rawConcl := parsed.rawConcl |
+        throwError "sos: missing rawConcl"
+      let some origConcl := parsed.origConcl |
+        throwError "sos: missing origConcl"
+      let some pTree := castRawToPoly rawConcl n |
+        throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
+      let pCMv ← toCMvExpr n pTree
+      pure (some (pTree, pCMv, origConcl))
+  let goalE ← match mode, pData? with
+    | .closed, some (_, pCMv, _) =>
+      mkAppOptM ``SOS.Goal.closed #[some nE, some pCMv]
+    | .strict εE hεE, some (_, pCMv, _) =>
+      mkAppOptM ``SOS.Goal.strict #[some nE, some pCMv, some εE, some hεE]
+    | .infeasible, _ =>
+      mkAppOptM ``SOS.Goal.infeasible #[some nE]
+    | _, _ => throwError "sos: internal: pData missing for non-infeasible mode"
   let checksE ← mkAppM ``SOS.Certificate.checks #[certE, goalE, gsListE]
   let trueE ← mkAppOptM ``Bool.true #[]
-  let decType ← mkEq checksE trueE
-  let decProof ← buildDecideTrue decType
-  let hTarget ← mkAppM ``SOS.sos_strict_sound
-    #[pCMv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
-  let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
-  let pE := Lean.toExpr pTree
-  let final ← mkAppOptM ``SOS.pos_orig_of_aeval
-    #[some (Lean.mkNatLit n), some φE, some pE, some origConcl,
-      some eqProof_p, some hTarget]
-  mv.assign final
-  Tactic.replaceMainGoal []
-
-/-- Infeasibility close. The conclusion is `False`; the goal becomes
-`<gᵢ_constraints> → False` after intros. -/
-def closeInfeasibleSosA (parsed : SOS.Reify.ParsedGoal)
-    (certE : Expr) : TacticM Unit := Tactic.withMainContext do
-  let n := parsed.atoms.size
-  let mv ← Tactic.getMainGoal
-  let φE ← buildFinValExpr parsed.atoms
-  let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
-    parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
-  let gsListE ← gsCMvListExpr n gPolys
-  let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
-  let goalE ← mkAppOptM ``SOS.Goal.infeasible #[some (Lean.mkNatLit n)]
-  let checksE ← mkAppM ``SOS.Certificate.checks #[certE, goalE, gsListE]
-  let trueE ← mkAppOptM ``Bool.true #[]
-  let decType ← mkEq checksE trueE
-  let decProof ← buildDecideTrue decType
-  let infeasibleProof ← mkAppM ``SOS.sos_infeasible_sound
-    #[gsListE, certE, decProof, φE, hgsProof]
-  mv.assign infeasibleProof
+  let decProof ← buildDecideTrue (← mkEq checksE trueE)
+  match mode, pData? with
+  | .closed, some (pTree, pCMv, origConcl) =>
+    let hTarget ← mkAppM ``SOS.sos_sound
+      #[pCMv, gsListE, certE, decProof, φE, hgsProof]
+    let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
+    let pE := Lean.toExpr pTree
+    let final ← mkAppOptM ``SOS.nonneg_orig_of_aeval
+      #[some nE, some φE, some pE, some origConcl, some eqProof_p, some hTarget]
+    mv.assign final
+  | .strict εE hεE, some (pTree, pCMv, origConcl) =>
+    let hTarget ← mkAppM ``SOS.sos_strict_sound
+      #[pCMv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
+    let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
+    let pE := Lean.toExpr pTree
+    let final ← mkAppOptM ``SOS.pos_orig_of_aeval
+      #[some nE, some φE, some pE, some origConcl, some eqProof_p, some hTarget]
+    mv.assign final
+  | .infeasible, _ =>
+    let infeasibleProof ← mkAppM ``SOS.sos_infeasible_sound
+      #[gsListE, certE, decProof, φE, hgsProof]
+    mv.assign infeasibleProof
+  | _, _ => throwError "sos: internal: pData missing for non-infeasible mode"
   Tactic.replaceMainGoal []
 
 /-! ### Tactic surface -/
@@ -366,14 +349,14 @@ elab_rules : tactic
       | none => throwError "sos: search failed to find a certificate"
       | some cert =>
         let certE ← certExprOfRuntime n cert
-        closeClosedSosA parsed certE
+        closeSos parsed certE .closed
     | .infeasible =>
       let goal : SOS.Goal n := .infeasible
       match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
       | none => throwError "sos: search failed to find an infeasibility certificate"
       | some cert =>
         let certE ← certExprOfRuntime n cert
-        closeInfeasibleSosA parsed certE
+        closeSos parsed certE .infeasible
     | .strict =>
       let some rawConcl := parsed.rawConcl |
         throwError "sos (strict): missing rawConcl"
@@ -390,7 +373,7 @@ elab_rules : tactic
           (← mkAppOptM ``Decidable.decide #[some hεType, none])
           (Lean.mkConst ``Bool.true))
         let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
-        closeStrictSosA parsed certE εE hεProof
+        closeSos parsed certE (.strict εE hεProof)
 
 /-! ### `sos?` — Try-this suggestion for the inline witness form
 
@@ -495,7 +478,7 @@ elab_rules : tactic
       | some cert =>
         emitSosSuggestion tk (formatCertificate cert)
         let certE ← certExprOfRuntime n cert
-        closeClosedSosA parsed certE
+        closeSos parsed certE .closed
     | .infeasible =>
       let goal : SOS.Goal n := .infeasible
       match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
@@ -503,7 +486,7 @@ elab_rules : tactic
       | some cert =>
         emitSosSuggestion tk (formatCertificate cert)
         let certE ← certExprOfRuntime n cert
-        closeInfeasibleSosA parsed certE
+        closeSos parsed certE .infeasible
     | .strict =>
       let some rawConcl := parsed.rawConcl |
         throwError "sos? (strict): missing rawConcl"
@@ -521,7 +504,7 @@ elab_rules : tactic
           (← mkAppOptM ``Decidable.decide #[some hεType, none])
           (Lean.mkConst ``Bool.true))
         let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
-        closeStrictSosA parsed certE εE hεProof
+        closeSos parsed certE (.strict εE hεProof)
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do
@@ -533,8 +516,8 @@ elab_rules : tactic
     Term.synthesizeSyntheticMVarsNoPostponing
     let certE ← instantiateMVars certE
     match parsed.shape with
-    | .closed => closeClosedSosA parsed certE
-    | .infeasible => closeInfeasibleSosA parsed certE
+    | .closed => closeSos parsed certE .closed
+    | .infeasible => closeSos parsed certE .infeasible
     | _ =>
       throwError "sos_witness: strict-positivity goals are not yet supported"
 
