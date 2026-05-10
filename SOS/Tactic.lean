@@ -309,7 +309,8 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
 
 syntax (name := sosTactic) "sos" : tactic
 syntax (name := sosTryTactic) "sos?" : tactic
-syntax (name := sosWitnessTactic) "sos_witness " term : tactic
+syntax (name := sosWitnessTactic)
+  "sos_witness " term ("with" "ε" ":=" term)? : tactic
 
 /-- Build a `SOS.Certificate n` Expr from a runtime `Certificate n`,
 quoted via `SOS.Poly.decompile` so each square round-trips through
@@ -417,14 +418,29 @@ private def formatCertificate {n : Nat} (cert : SOS.Certificate n) : String :=
   s!"\{ sigma0 := \{ squares := {formatSquares σ₀_decomp} }, \
      sigmas := {formatSigmasList σᵢ_decomp} }"
 
-/-- Emit the `Try this:` suggestion for a found certificate. -/
-private def emitSosSuggestion (tk : Syntax) (certText : String) : TacticM Unit := do
-  let suggestion : String := s!"sos_witness {certText}"
-  match Lean.Parser.runParserCategory (← getEnv) `tactic suggestion with
-  | .ok stx =>
-    Lean.Meta.Tactic.TryThis.addSuggestion tk (⟨stx⟩ : TSyntax `tactic)
-  | .error err =>
-    throwError "sos?: failed to parse suggestion as tactic syntax: {err}"
+/-- Format an ε rational as a Lean source literal (`(num : ℚ)` or
+`((num : ℚ) / den)`), suitable for the `with ε := …` clause. -/
+private def formatRat (r : ℚ) : String :=
+  if r.den = 1 then s!"({r.num} : ℚ)"
+  else s!"(({r.num} : ℚ) / {r.den})"
+
+/-- Emit the `Try this:` suggestion for a found certificate. When `ε?`
+is `some r`, append `with ε := <r>` so the suggestion compiles for
+strict-positivity goals.
+
+We pass the suggestion as a raw `SuggestionText.string` rather than
+roundtripping through `Parser.runParserCategory`; the latter re-pretty-
+prints the parsed syntax tree and squashes whitespace around the
+`with ε := …` clause. -/
+private def emitSosSuggestion (tk : Syntax) (certText : String)
+    (ε? : Option ℚ) : TacticM Unit := do
+  let suffix := match ε? with
+    | none => ""
+    | some r => s!" with ε := {formatRat r}"
+  let suggestion : String := s!"sos_witness {certText}{suffix}"
+  let sugg : Lean.Meta.Tactic.TryThis.Suggestion :=
+    { suggestion := .string suggestion }
+  Lean.Meta.Tactic.TryThis.addSuggestion tk sugg
 
 /-- The shared body of `sos` and `sos?`. Runs search for the parsed
 goal, optionally emits a `Try this:` suggestion at `suggest?`, and
@@ -435,10 +451,10 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
   let n := parsed.atoms.size
   let gPolys ← castConstraints parsed.constraints n
   let gsCMv := gPolys.map SOS.Poly.toCMv
-  let withFoundCert (cert : SOS.Certificate n)
-      (mode : CloseMode) : TacticM Unit := do
+  let withFoundCert (cert : SOS.Certificate n) (mode : CloseMode)
+      (ε? : Option ℚ) : TacticM Unit := do
     if let some tk := suggest? then
-      emitSosSuggestion tk (formatCertificate cert)
+      emitSosSuggestion tk (formatCertificate cert) ε?
     let certE ← certExprOfRuntime n cert
     closeSos parsed certE mode
   match parsed.shape with
@@ -450,11 +466,11 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
     let goal : SOS.Goal n := .closed pTree.toCMv
     match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
-    | some cert => withFoundCert cert .closed
+    | some cert => withFoundCert cert .closed none
   | .infeasible =>
     match (← (SOS.Search.runSearch .infeasible gsCMv : IO _)) with
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
-    | some cert => withFoundCert cert .infeasible
+    | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let some concl := parsed.concl |
       throwError "{tag} (strict): missing concl"
@@ -465,7 +481,7 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
     | some res =>
       let εE := Lean.toExpr res.ε
       let hεProof ← buildStrictHεProof εE
-      withFoundCert res.cert (.strict εE hεProof)
+      withFoundCert res.cert (.strict εE hεProof) (some res.ε)
 
 elab_rules : tactic
   | `(tactic| sos) => do
@@ -479,19 +495,35 @@ elab_rules : tactic
       throwError "sos?: goal not in supported fragment"
     runSosTactic parsed (some tk) "sos?"
 
-elab_rules : tactic
-  | `(tactic| sos_witness $cert:term) => do
-    let some parsed ← SOS.Reify.parseGoalAtomic |
-      throwError "sos_witness: goal not in supported fragment"
-    let n := parsed.atoms.size
-    let certTy ← mkAppOptM ``SOS.Certificate #[some (Lean.mkNatLit n)]
-    let certE ← Term.elabTermEnsuringType cert certTy
+/-- Shared body of `sos_witness` (with and without the `with ε := …`
+suffix). Elaborates the certificate, dispatches on the parsed goal
+shape, and routes through `closeSos`. -/
+private def runSosWitness (cert : Term)
+    (epsTerm? : Option Term) : TacticM Unit := do
+  let some parsed ← SOS.Reify.parseGoalAtomic |
+    throwError "sos_witness: goal not in supported fragment"
+  let n := parsed.atoms.size
+  let certTy ← mkAppOptM ``SOS.Certificate #[some (Lean.mkNatLit n)]
+  let certE ← Term.elabTermEnsuringType cert certTy
+  Term.synthesizeSyntheticMVarsNoPostponing
+  let certE ← instantiateMVars certE
+  match parsed.shape, epsTerm? with
+  | .closed, none => closeSos parsed certE .closed
+  | .infeasible, none => closeSos parsed certE .infeasible
+  | .strict, some εT =>
+    let εE ← Term.elabTermEnsuringType εT ratTy
     Term.synthesizeSyntheticMVarsNoPostponing
-    let certE ← instantiateMVars certE
-    match parsed.shape with
-    | .closed => closeSos parsed certE .closed
-    | .infeasible => closeSos parsed certE .infeasible
-    | _ =>
-      throwError "sos_witness: strict-positivity goals are not yet supported"
+    let εE ← instantiateMVars εE
+    let hεProof ← buildStrictHεProof εE
+    closeSos parsed certE (.strict εE hεProof)
+  | .strict, none =>
+    throwError "sos_witness: strict-positivity goal requires `with ε := <rat>`"
+  | _, some _ =>
+    throwError "sos_witness: `with ε := …` is only valid on strict-positivity goals"
+
+elab_rules : tactic
+  | `(tactic| sos_witness $cert:term) => runSosWitness cert none
+  | `(tactic| sos_witness $cert:term with ε := $eps:term) =>
+      runSosWitness cert (some eps)
 
 end SOS
