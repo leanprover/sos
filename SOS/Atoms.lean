@@ -4,11 +4,11 @@ Released under Apache 2.0 license as described in the file LICENSE.
 -/
 import Lean.Expr
 
-namespace Sos
+namespace SOS
 
 /-- Atom valuation table: a finite ordered list of `Lean.Expr`s that appear
 in a reified goal, indexed by ℕ. The interpretation is supplied externally
-(see `Sos.Reify` for the build-up and `Sos.Raw` for evaluation). -/
+(see `SOS.Reify` for the build-up and `SOS.Raw` for evaluation). -/
 structure AtomTable where
   atoms : Array Lean.Expr := #[]
   deriving Inhabited
@@ -23,4 +23,4 @@ def get? (t : AtomTable) (i : Nat) : Option Lean.Expr := t.atoms[i]?
 
 end AtomTable
 
-end Sos
+end SOS

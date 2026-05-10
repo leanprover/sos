@@ -11,9 +11,9 @@ proofs are needed at this layer. If LDL fails (matrix is not strictly
 PSD on its diagonal pivots) or the four-square search fails, we
 return `none` and the search loop tries the next denominator.
 -/
-import Sos.Certificate
+import SOS.Certificate
 
-namespace Sos.LDL
+namespace SOS.LDL
 
 open CPoly
 
@@ -180,4 +180,4 @@ def reconstruct {nVar : Nat} (n : Nat) (Q : Array ℚ)
             squares := squares ++ [CMvPolynomial.C c * wi]
     return some squares
 
-end Sos.LDL
+end SOS.LDL

@@ -2,11 +2,11 @@
 Speed-test candidate set. Build target is wall-clock < 10s for the
 whole file on the kim-em/sos main toolchain.
 -/
-import Sos
+import SOS
 
-open Sos CPoly
+open SOS CPoly
 
--- 1. closed positivity, 1 var, deg 2 (smoke)
+-- 1. closed positivity, 1 var, deg 2
 example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
 
 -- 2. closed positivity, 1 var, deg 4

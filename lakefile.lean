@@ -25,15 +25,15 @@ require leanCsdp from git
 require «CompPoly» from git
   "https://github.com/Verified-zkEVM/CompPoly" @ "master"
 
--- We don't set `precompileModules := true` on Sos itself: the FFI
+-- We don't set `precompileModules := true` on SOS itself: the FFI
 -- (`@[extern]` declarations) lives in `LeanCsdp.Basic`, which has
 -- `precompileModules := true` upstream. Setting it here too triggers a
 -- runtime-linker failure on Linux during sos's own dynlib loading
 -- (libLake_shared.so isn't on LD_LIBRARY_PATH at compile time).
 @[default_target]
-lean_lib Sos where
+lean_lib SOS where
   moreLinkArgs := blasLapackLinkArgs
 
-lean_exe «sos-example» where
-  root := `Sos.Smoke
+@[test_driver]
+lean_lib SOSTest where
   moreLinkArgs := blasLapackLinkArgs

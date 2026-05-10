@@ -33,11 +33,11 @@ closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
   rationals over a denominator schedule, then verify the resulting
   certificate exactly via `Certificate.checks`.
 -/
-import Sos.Certificate
-import Sos.LDL
+import SOS.Certificate
+import SOS.LDL
 import LeanCsdp
 
-namespace Sos.Search
+namespace SOS.Search
 
 open CPoly
 
@@ -429,4 +429,4 @@ def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
     -- use `runStrictSearch`. Here we drop the ε.
     return none
 
-end Sos.Search
+end SOS.Search

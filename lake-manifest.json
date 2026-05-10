@@ -15,7 +15,7 @@
    "type": "git",
    "subDir": null,
    "scope": "",
-   "rev": "4ce19ee7744ba46049c60e2e4f671078d10039e8",
+   "rev": "2a2014284ad0e8eea49adc4277767c9594e47524",
    "name": "leanCsdp",
    "manifestFile": "lake-manifest.json",
    "inputRev": "main",

@@ -7,7 +7,7 @@ Goal reifier. Walks a Lean expression of shape
     ∀ x : Fin n → ℝ, (g₁ x ⊳ 0) → … → (gₘ x ⊳ 0) → conclusion
 
 and returns a `ParsedGoal` containing both the typed-AST form
-(`Sos.Poly n`) of every polynomial encountered and the original
+(`SOS.Poly n`) of every polynomial encountered and the original
 `Lean.Expr` for each polynomial side. Both forms are needed by the
 elaborator: the AST drives the search and the verifier; the
 original Expr appears in the user-facing goal and must be matched
@@ -19,11 +19,11 @@ and the standard arithmetic constructors `HAdd`, `HSub`, `HMul`,
 `HPow` (with `Nat`-literal exponent), `Neg`, and the rational casts
 into ℝ. Anything else throws an error and the tactic falls through.
 -/
-import Sos.Raw
-import Sos.Certificate
+import SOS.Raw
+import SOS.Certificate
 import Lean
 
-namespace Sos.Reify
+namespace SOS.Reify
 
 open Lean Meta Elab CPoly
 
@@ -92,7 +92,7 @@ partial def ratLit? (e : Expr) : MetaM (Option ℚ) := do
 The new design treats the reifier as a `Nat → ℝ`-indexed walker that
 accumulates atoms (arbitrary `ℝ`-typed subterms it doesn't recognise
 as ring operators or rational literals) into a state array. The
-output is a `Sos.Poly.Raw` whose `.var i` references atom `i` in the
+output is a `SOS.Poly.Raw` whose `.var i` references atom `i` in the
 final array.
 
 Atom identity uses `withTransparency .reducible` plus pre-normalisation
@@ -139,7 +139,7 @@ def addAtom (e : Expr) : ReifyM Nat := do
 /-! ### Raw-AST reifier -/
 
 /-- Walk an `Expr` of type `ℝ`, accumulating atoms and producing an
-untyped `Sos.Poly.Raw`. Recognises:
+untyped `SOS.Poly.Raw`. Recognises:
 
   * Rational literals via `ratLit?`.
   * `HAdd`, `HSub`, `HMul` over ℝ.
@@ -147,33 +147,33 @@ untyped `Sos.Poly.Raw`. Recognises:
   * `Neg`.
 
 Anything else becomes an atom via `addAtom`. -/
-partial def reifyRaw (e : Expr) : ReifyM Sos.Poly.Raw := do
+partial def reifyRaw (e : Expr) : ReifyM SOS.Poly.Raw := do
   let e ← liftM (m := MetaM) (whnfR e)
   if let some r ← liftM (m := MetaM) (ratLit? e) then
-    return Sos.Poly.Raw.const r
+    return SOS.Poly.Raw.const r
   match_expr e with
   | HAdd.hAdd _ _ _ _ a b =>
-    return Sos.Poly.Raw.add (← reifyRaw a) (← reifyRaw b)
+    return SOS.Poly.Raw.add (← reifyRaw a) (← reifyRaw b)
   | HSub.hSub _ _ _ _ a b =>
-    return Sos.Poly.Raw.sub (← reifyRaw a) (← reifyRaw b)
+    return SOS.Poly.Raw.sub (← reifyRaw a) (← reifyRaw b)
   | HMul.hMul _ _ _ _ a b =>
-    return Sos.Poly.Raw.mul (← reifyRaw a) (← reifyRaw b)
+    return SOS.Poly.Raw.mul (← reifyRaw a) (← reifyRaw b)
   | HPow.hPow _ _ _ _ a k =>
     if let some kNat ← liftM (m := MetaM) (natLit? k) then
-      return Sos.Poly.Raw.pow (← reifyRaw a) kNat
+      return SOS.Poly.Raw.pow (← reifyRaw a) kNat
     -- Non-literal exponent: opacify the whole pow expression.
-    return Sos.Poly.Raw.var (← addAtom e)
+    return SOS.Poly.Raw.var (← addAtom e)
   | Neg.neg _ _ a =>
-    return Sos.Poly.Raw.neg (← reifyRaw a)
+    return SOS.Poly.Raw.neg (← reifyRaw a)
   | _ =>
-    return Sos.Poly.Raw.var (← addAtom e)
+    return SOS.Poly.Raw.var (← addAtom e)
 
 /-! ### Atomic parser
 
 The conservative parser operates directly on the main goal:
 introducing ∀ binders (when the binder type is ℝ), introducing
 constraint hypotheses (when their shape is recognised), and reifying
-the conclusion / each constraint into `Sos.Poly.Raw` against a
+the conclusion / each constraint into `SOS.Poly.Raw` against a
 shared atom array.
 
 Each speculative intro is wrapped in `Tactic.saveState` /
@@ -182,7 +182,7 @@ leave the local context polluted with introduced binders.
 -/
 
 /-- Output of `parseGoalAtomic`. The reified polynomials are kept as
-untyped `Sos.Poly.Raw`; the elaborator casts them to `Sos.Poly n` at
+untyped `SOS.Poly.Raw`; the elaborator casts them to `SOS.Poly n` at
 `n = atoms.size` via `Raw.cast`. -/
 structure ParsedGoal where
   /-- Atom Exprs collected from the conclusion and constraints. -/
@@ -190,14 +190,14 @@ structure ParsedGoal where
   /-- Coarse shape of the conclusion. -/
   shape    : ShapeKind
   /-- Reified conclusion. `none` iff `shape = .infeasible`. -/
-  rawConcl : Option Sos.Poly.Raw
+  rawConcl : Option SOS.Poly.Raw
   /-- Original ℝ-valued conclusion expression. The polynomial side
   of `0 ≤ origConcl`, `0 < origConcl`, etc. `none` iff `shape =
   .infeasible`. -/
   origConcl : Option Lean.Expr
   /-- Reified constraint polynomials. Indices align with `gsKinds`,
   `hFVars`, and `origGs`. -/
-  rawGs    : List Sos.Poly.Raw
+  rawGs    : List SOS.Poly.Raw
   /-- Original ℝ-valued constraint expressions, paired with `rawGs`.
   For `gsKinds[i] = .nonpos`, this is the polynomial side of the
   hypothesis `origGs[i] ≤ 0`. -/
@@ -234,9 +234,9 @@ and the updated atom array. Used by both the iterative parser and
 `mergeLocalCtxConstraints`. -/
 def recogniseConstraint (h : Expr) (atoms : Array Expr) :
     Tactic.TacticM (Option
-      (ConstraintKind × Sos.Poly.Raw × Lean.Expr × Array Expr)) := do
+      (ConstraintKind × SOS.Poly.Raw × Lean.Expr × Array Expr)) := do
   let tryReify (e : Expr) (atoms : Array Expr) :
-      Tactic.TacticM (Option (Sos.Poly.Raw × Array Expr)) := do
+      Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
     try
       let (raw, atoms') ← (reifyRaw e).goWith atoms
       return some (raw, atoms')
@@ -261,7 +261,7 @@ def recogniseConstraint (h : Expr) (atoms : Array Expr) :
   | _ => return none
 
 partial def parseGoalAtomicAux
-    (atoms : Array Expr) (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
+    (atoms : Array Expr) (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
     (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
     Tactic.TacticM (Option ParsedGoal) := Tactic.withMainContext do
   let mv ← Tactic.getMainGoal
@@ -295,7 +295,7 @@ where
   /-- Try to match the goal against a recognised conclusion shape.
   Reifies via `reifyRaw` against the running `atoms`. -/
   tryReifyConclusion (goalType : Expr) (atoms : Array Expr)
-      (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
+      (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
       (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
       Tactic.TacticM (Option ParsedGoal) := do
     let goalType ← whnfR goalType
@@ -322,7 +322,7 @@ where
   /-- Try to recognise `g → body` and recurse. The hypothesis must
   reify cleanly under the current atom set; otherwise we restore. -/
   tryConstraintIntro (goalType : Expr) (atoms : Array Expr)
-      (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
+      (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
       (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
       Tactic.TacticM (Option ParsedGoal) := do
     let .forallE _ hypType body _ := goalType | return none
@@ -340,7 +340,7 @@ where
   /-- Run `reifyRaw` against the current atom array, returning none
   if reify throws. -/
   tryReify (e : Expr) (atoms : Array Expr) :
-      Tactic.TacticM (Option (Sos.Poly.Raw × Array Expr)) := do
+      Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
     try
       let (raw, atoms') ← (reifyRaw e).goWith atoms
       return some (raw, atoms')
@@ -381,4 +381,4 @@ def parseGoalAtomic : Tactic.TacticM (Option ParsedGoal) := do
   | some out => return some (← mergeLocalCtxConstraints out)
   | none => st.restore; return none
 
-end Sos.Reify
+end SOS.Reify

@@ -23,42 +23,29 @@ jobs:
       - name: Install BLAS / LAPACK
         run: |
           sudo apt-get update
-          # `zstd` is required by our toolchain-install fallback and the
-          # Mathlib cache get step.
-          sudo apt-get install -y liblapack-dev libblas-dev gfortran zstd
+          sudo apt-get install -y liblapack-dev libblas-dev gfortran
 
-      # Install elan and the toolchain pinned in lean-toolchain. Mirrors
-      # lean-csdp's setup with retry + GitHub-release fallback.
-      - name: Install elan and Lean toolchain
+      - name: Install elan
         shell: bash
         run: |
           set -e
-          if ! command -v elan >/dev/null 2>&1; then
-            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o elan-init.sh
-            sh elan-init.sh -y --default-toolchain none
-          fi
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o elan-init.sh
+          sh elan-init.sh -y --default-toolchain none
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.elan/bin:$PATH"
-          ./scripts/install-toolchain.sh
 
       - name: Fetch Mathlib cache
         run: lake exe cache get
 
-      - name: Build Sos library + Examples + smoke exe
-        run: lake build Sos Sos.Examples sos-example
+      - name: Build SOS
+        run: lake build SOS
 
-      - name: Run end-to-end smoke test
-        run: |
-          set +e
-          ./.lake/build/bin/sos-example > /tmp/sos.out 2>&1
-          rc=$?
-          tail -25 /tmp/sos.out
-          exit $rc
+      - name: Run tests
+        run: lake test
 
       - name: Verify sorry/axiom-free
         run: |
-          if grep -rn '\bsorry\b\|^\s*axiom' Sos/; then
-            echo "FAIL: sorry or axiom found in Sos/"
+          if grep -rn '\bsorry\b\|^\s*axiom' SOS/; then
+            echo "FAIL: sorry or axiom found in SOS/"
             exit 1
           fi
-          echo "PASS: Sos/ has no sorry or axiom."
+          echo "PASS: SOS/ has no sorry or axiom."

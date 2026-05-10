@@ -4,12 +4,12 @@ Released under Apache 2.0 license as described in the file LICENSE.
 
 Soundness theorems for SOS certificates.
 -/
-import Sos.Certificate
+import SOS.Certificate
 import Mathlib.Data.Real.Basic
 import Mathlib.Algebra.Order.Ring.Defs
 import Mathlib.Tactic.Linarith
 
-namespace Sos
+namespace SOS
 
 open CPoly
 
@@ -66,11 +66,11 @@ these via the ring-hom structure of `eval₂Hom`.
 
 /-! ### Reflection: typed AST evaluation matches CMvPolynomial aeval -/
 
-/-- The bridge between the typed AST `Sos.Poly n` and CompPoly's
+/-- The bridge between the typed AST `SOS.Poly n` and CompPoly's
 `CMvPolynomial n ℚ`: evaluating the AST in `ℝ` agrees with evaluating
 its `CMvPolynomial` image via `aeval`. Drives the `bridgeTo` /
 `bridgeFrom` elaborator helpers. -/
-theorem Poly.evalReal_eq_aeval (φ : Fin n → ℝ) (p : Sos.Poly n) :
+theorem Poly.evalReal_eq_aeval (φ : Fin n → ℝ) (p : SOS.Poly n) :
     p.evalReal φ = CMvPolynomial.aeval φ p.toCMv := by
   induction p with
   | const r =>
@@ -97,35 +97,35 @@ expressions and `aeval x p.toCMv`-form goals fed to `sos_sound`. -/
 /-- Bring a hypothesis `0 ≤ origExpr` into `0 ≤ aeval x p.toCMv` form, given
 a proof `evalReal x p = origExpr` (typically by `simp [evalReal]; ring`). -/
 theorem aeval_nonneg_of_orig
-    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
-    (h_eq : Sos.Poly.evalReal x p = e) (h : 0 ≤ e) :
+    {x : Fin n → ℝ} {p : SOS.Poly n} {e : ℝ}
+    (h_eq : SOS.Poly.evalReal x p = e) (h : 0 ≤ e) :
     0 ≤ CMvPolynomial.aeval x p.toCMv := by
-  rw [← Sos.Poly.evalReal_eq_aeval, h_eq]; exact h
+  rw [← SOS.Poly.evalReal_eq_aeval, h_eq]; exact h
 
 /-- Bring a hypothesis `origExpr ≤ 0` into `0 ≤ aeval x p.toCMv` form, given
 the bridge equality `evalReal x p = -origExpr`. The reifier emits
 `p = -reify(origExpr)` for `≤ 0` constraints, so this matches. -/
 theorem aeval_nonneg_of_orig_neg
-    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
-    (h_eq : Sos.Poly.evalReal x p = -e) (h : e ≤ 0) :
+    {x : Fin n → ℝ} {p : SOS.Poly n} {e : ℝ}
+    (h_eq : SOS.Poly.evalReal x p = -e) (h : e ≤ 0) :
     0 ≤ CMvPolynomial.aeval x p.toCMv := by
-  rw [← Sos.Poly.evalReal_eq_aeval, h_eq]
+  rw [← SOS.Poly.evalReal_eq_aeval, h_eq]
   exact neg_nonneg.mpr h
 
 /-- Take a `0 ≤ aeval x p.toCMv` proof back to the user goal `0 ≤ origExpr`,
 given the same bridge equality. -/
 theorem nonneg_orig_of_aeval
-    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
-    (h_eq : Sos.Poly.evalReal x p = e) (h : 0 ≤ CMvPolynomial.aeval x p.toCMv) :
+    {x : Fin n → ℝ} {p : SOS.Poly n} {e : ℝ}
+    (h_eq : SOS.Poly.evalReal x p = e) (h : 0 ≤ CMvPolynomial.aeval x p.toCMv) :
     0 ≤ e := by
-  rw [← h_eq, Sos.Poly.evalReal_eq_aeval]; exact h
+  rw [← h_eq, SOS.Poly.evalReal_eq_aeval]; exact h
 
 /-- Strict version of `nonneg_orig_of_aeval`. -/
 theorem pos_orig_of_aeval
-    {x : Fin n → ℝ} {p : Sos.Poly n} {e : ℝ}
-    (h_eq : Sos.Poly.evalReal x p = e) (h : 0 < CMvPolynomial.aeval x p.toCMv) :
+    {x : Fin n → ℝ} {p : SOS.Poly n} {e : ℝ}
+    (h_eq : SOS.Poly.evalReal x p = e) (h : 0 < CMvPolynomial.aeval x p.toCMv) :
     0 < e := by
-  rw [← h_eq, Sos.Poly.evalReal_eq_aeval]; exact h
+  rw [← h_eq, SOS.Poly.evalReal_eq_aeval]; exact h
 
 /-! ### Soundness theorems -/
 
@@ -238,4 +238,4 @@ theorem sos_infeasible_sound
       CMvPolynomial.aeval_neg, CMvPolynomial.aeval_one] at h_neg_one_nonneg
   linarith
 
-end Sos
+end SOS

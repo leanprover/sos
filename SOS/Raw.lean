@@ -2,10 +2,10 @@
 Copyright (c) 2026 Kim Morrison. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 -/
-import Sos.Atoms
+import SOS.Atoms
 import Mathlib.Data.Real.Basic
 
-namespace Sos.Poly
+namespace SOS.Poly
 
 /-- Untyped polynomial AST with `ℕ`-valued atom indices. Built up during
 reification before the total atom count is known. -/
@@ -40,9 +40,9 @@ def Raw.eval (φ : Nat → ℝ) : Raw → ℝ
   | .mul p q   => p.eval φ * q.eval φ
   | .pow p k   => p.eval φ ^ k
 
-end Sos.Poly
+end SOS.Poly
 
-namespace Sos
+namespace SOS
 
 /-- Typed polynomial AST in `n` variables. Obtained from `Poly.Raw` once the
 total atom count is known. -/
@@ -56,12 +56,12 @@ inductive Poly (n : Nat) where
   | pow   : Poly n → Nat → Poly n
   deriving Inhabited, Repr, DecidableEq
 
-end Sos
+end SOS
 
-namespace Sos.Poly
+namespace SOS.Poly
 
 /-- Cast `Raw` into the typed `Poly n` once `n ≥ r.maxAtomBound`. -/
-def Raw.cast : (n : Nat) → (r : Raw) → r.maxAtomBound ≤ n → Sos.Poly n
+def Raw.cast : (n : Nat) → (r : Raw) → r.maxAtomBound ≤ n → SOS.Poly n
   | _, .const r,   _ => .const r
   | _, .var i,     h => .var ⟨i, by simp [maxAtomBound] at h; omega⟩
   | n, .neg p,     h => .neg (cast n p h)
@@ -76,12 +76,12 @@ def Raw.cast : (n : Nat) → (r : Raw) → r.maxAtomBound ≤ n → Sos.Poly n
          (cast n q (le_trans (Nat.le_max_right _ _) h))
   | n, .pow p k, h => .pow (cast n p h) k
 
-end Sos.Poly
+end SOS.Poly
 
-namespace Sos.Poly
+namespace SOS.Poly
 
 /-- Real-valued denotation of the typed AST under a `Fin n → ℝ` valuation. -/
-def evalReal {n : Nat} (φ : Fin n → ℝ) : Sos.Poly n → ℝ
+def evalReal {n : Nat} (φ : Fin n → ℝ) : SOS.Poly n → ℝ
   | .const r   => (r : ℝ)
   | .var i     => φ i
   | .neg p     => -evalReal φ p
@@ -124,4 +124,4 @@ theorem Raw.eval_cast {n : Nat} (r : Raw) (h : r.maxAtomBound ≤ n) (φ : Fin n
     simp only [Raw.eval, Raw.cast, evalReal]
     rw [ih]
 
-end Sos.Poly
+end SOS.Poly

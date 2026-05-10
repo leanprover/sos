@@ -6,21 +6,59 @@ Harrison's sum-of-squares decision procedure for nonlinear real
 arithmetic, in Lean 4. Based on the design from
 [Harrison 2007 (TPHOLs)](https://link.springer.com/chapter/10.1007/978-3-540-74591-4_9).
 
+This tactic depends on
+[`Verified-zkEVM/CompPoly`](https://github.com/Verified-zkEVM/CompPoly)
+for a kernel-decidable computational multivariate-polynomial type
+(`CMvPolynomial n ℚ`), which is what the verifier reduces certificate
+checks against. CompPoly itself depends on Mathlib. As a consequence,
+`sos` is a downstream library and cannot be migrated into Mathlib
+itself unless CompPoly is upstreamed first.
+
 ## Status
 
 The `by sos` tactic closes nonlinear-real-arithmetic goals end-to-end:
 reify the goal, encode an SDP, call CSDP, round the float Gram matrix
 to rationals, decompose via LDLᵀ + Lagrange four-square, and dispatch
-the matching verifier-soundness lemma. All five end-state goals
-close automatically:
+the matching verifier-soundness lemma. A representative sample from
+[`SOSTest/Examples.lean`](SOSTest/Examples.lean):
 
 ```lean
-import Sos
-example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
-example (x y : ℝ) : 0 ≤ x^2 + 2*x*y + y^2 := by sos
-example (x : ℝ) : 0 < x^2 + 1 := by sos
-example (x : ℝ) : ¬ (x^2 + 1 ≤ 0) := by sos
-example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 - x + 1/4 := by sos
+import SOS
+
+-- Cauchy–Schwarz (rank 1, deg 4, 4 vars)
+example (a b c d : ℝ) :
+    0 ≤ (a^2 + b^2) * (c^2 + d^2) - (a*c + b*d)^2 := by sos
+
+-- Cyclic Schur, 3 vars
+example (a b c : ℝ) : 0 ≤ a^2 + b^2 + c^2 - a*b - b*c - a*c := by sos
+
+-- AM ≥ GM squared
+example (x y : ℝ) : 0 ≤ (x^2 + y^2)^2 - 4*x^2*y^2 := by sos
+
+-- Strict positivity, multivariate
+example (x y : ℝ) : 0 < x^2 + y^2 + 1 := by sos
+
+-- Infeasibility
+example (x : ℝ) : ¬ (x^4 + 1 ≤ 0) := by sos
+
+-- Constrained
+example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^3 + x := by sos
+example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
+    0 ≤ x^2 + 2*x*y + y^2 := by sos
+
+-- Strict-inequality hypothesis (promoted to `0 ≤ x` via `le_of_lt`)
+example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
+```
+
+`by sos?` reports the witness it found as a `Try this:` suggestion
+that you can paste back as a `sos_witness …` invocation, freezing the
+proof so it no longer depends on calling CSDP at compile time:
+
+```lean
+example (x : ℝ) : 0 ≤ x^2 + 1 := by sos?
+-- Try this:
+--   [apply] sos_witness
+--     { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
 ```
 
 Atoms are recovered as arbitrary `ℝ`-typed subterms (free variables,
@@ -41,13 +79,10 @@ example : True := by
   trivial
 ```
 
-`by sos_witness <cert>` is also available for cases where the user
-wants to supply a hand-built certificate directly.
-
-The library is sorry-free and axiom-free. Soundness factors through
-`IsSumSq.nonneg` (Mathlib) and the `aeval` ring-hom structure on
-CompPoly's `CMvPolynomial n ℚ`. Two design points worth flagging,
-both following Harrison's [TPHOLs 2007 paper]
+The soundness lemmas reduce to `IsSumSq.nonneg` (Mathlib) once the
+goal has been transported through the `aeval` ring-hom on CompPoly's
+`CMvPolynomial n ℚ`. Two design points worth flagging, both following
+Harrison's [TPHOLs 2007 paper]
 (https://link.springer.com/chapter/10.1007/978-3-540-74591-4_9):
 
 - **`min tr(X)` cost matrix.** CSDP's interior-point step has no
@@ -56,69 +91,51 @@ both following Harrison's [TPHOLs 2007 paper]
 - **Zero-pivot LDLᵀ.** Rank-deficient SOS Grams (`(x + y)²` has
   Gram `[[1,1],[1,1]]`, rank 1) require the "completing the square"
   routine to accept a zero pivot when the residual column is also
-  zero. Our `Sos.LDL.decompose` does this; `LDL.reconstruct` already
+  zero. Our `SOS.LDL.decompose` does this; `LDL.reconstruct` already
   drops the zero-D contributions.
 
-## Smoke test
+## Building and testing
 
 ```
 git clone https://github.com/kim-em/sos
 cd sos
 lake exe cache get
-lake build sos-example
-.lake/build/bin/sos-example
+lake test
 ```
 
-Expected output (last few lines):
-
-```
-Success: SDP solved
-Primal objective value: 0.0000000e+00
-Dual objective value: 0.0000000e+00
-Relative primal infeasibility: 0.00e+00
-Relative dual infeasibility: 5.00e-11
-✓ runSearch produced cert with 2 σ₀-squares, 0 σᵢ blocks.
-✓ cert.checks smokeGoal [] = true
-```
+`lake test` elaborates `SOSTest`, which runs `by sos` against every
+example in [`SOSTest/Examples.lean`](SOSTest/Examples.lean) — each
+invocation calls CSDP, rounds the Gram matrix, reconstructs the
+certificate, and checks it. A passing `lake test` is end-to-end
+verification of the search/round/reconstruct/verify pipeline.
 
 ## Architecture
 
-```
-goal expression  ── Sos.Reify.parseGoalAtomic ─▶  ParsedGoal
-                                                       │  (atoms : Array Expr,
-                                                       │   rawConcl, rawGs : Sos.Poly.Raw,
-                                                       │   hFVars from intro / lctx scan)
-                                                       ▼
-                                              Sos.Search.runSearch
-                                                       │
-                                                       │  builds SDP, calls CSDP,
-                                                       │  rounds rationals, runs LDL,
-                                                       │  reconstructs squares
-                                                       │
-                                                       ▼
-                                              Sos.Certificate n  (validated)
-                                                       │
-                                                       ▼
-                                          Sos.Tactic.closeClosedSosA /
-                                          closeStrictSosA /
-                                          closeInfeasibleSosA
-                                                       │
-                                                       ▼
-                                                ℝ-level proof
-```
+The tactic runs four stages on a `by sos` goal:
+
+1. `SOS.Reify.parseGoalAtomic` walks the goal expression, collecting
+   atomic ℝ-typed subterms into an array and producing untyped
+   `SOS.Poly.Raw` ASTs for the conclusion and each constraint
+   hypothesis (drawn from `intro`-binders and the local context).
+2. `SOS.Search.runSearch` builds the Putinar-form SDP, calls CSDP,
+   rounds the float Gram matrix to rationals, runs LDLᵀ, and
+   reconstructs squares — yielding a validated `SOS.Certificate n`.
+3. `SOS.Tactic.closeClosedSosA` / `closeStrictSosA` /
+   `closeInfeasibleSosA` consumes the certificate and discharges the
+   real-arithmetic goal via the matching soundness lemma in
+   `SOS.Verifier`.
 
 | Module | What it provides |
 |---|---|
-| `Sos.Atoms` | Atom-table type for the reifier. |
-| `Sos.Raw` | `Poly.Raw` and typed `Poly n` ASTs + reflection theorem. |
-| `Sos.Certificate` | `Goal n`, `SOSDecomp`, `Certificate n`, `checks` predicate. |
-| `Sos.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound`, plus `aeval_*` and `evalReal_eq_aeval` bridge lemmas. |
-| `Sos.LDL` | Rational LDLᵀ, Lagrange 4-square, Gram→SOS reconstruction. |
-| `Sos.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop, ε-schedule for strict positivity. |
-| `Sos.Reify` | Atom-collecting Lean-`Expr` walker → `ParsedGoal` (atom array, untyped `Sos.Poly.Raw` for conclusion + constraints, hypothesis FVars). |
-| `Sos.Tactic` | `by sos` (search-driven) and `by sos_witness <cert>` elaborators. |
-| `Sos.Examples` | Worked examples invoking the tactic. |
-| `Sos.Smoke` | Programmatic smoke test built as the `sos-example` lean_exe. |
+| `SOS.Atoms` | Atom-table type for the reifier. |
+| `SOS.Raw` | `Poly.Raw` and typed `Poly n` ASTs + reflection theorem. |
+| `SOS.Certificate` | `Goal n`, `SOSDecomp`, `Certificate n`, `checks` predicate. |
+| `SOS.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound`, plus `aeval_*` and `evalReal_eq_aeval` bridge lemmas. |
+| `SOS.LDL` | Rational LDLᵀ, Lagrange 4-square, Gram→SOS reconstruction. |
+| `SOS.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop, ε-schedule for strict positivity. |
+| `SOS.Reify` | Atom-collecting Lean-`Expr` walker → `ParsedGoal` (atom array, untyped `SOS.Poly.Raw` for conclusion + constraints, hypothesis FVars). |
+| `SOS.Tactic` | `by sos` (search-driven) and `by sos_witness <cert>` elaborators. |
+| `SOSTest.Examples` | Worked examples invoking the tactic; serves as the `lake test` driver. |
 
 ## Dependencies
 
@@ -137,16 +154,6 @@ System dependencies (BLAS/LAPACK, transitively via lean-csdp):
 | Windows  | MSYS2 mingw-w64 with `mingw-w64-x86_64-openblas` |
 
 CI runs Linux-only.
-
-## Out of scope (intentionally)
-
-- Univariate polynomial inequalities — already complete via root
-  isolation in real-closed-field decision procedures (e.g.
-  `hex-rcf` once it exists).
-- Schmüdgen form (`2ᵐ` SOS multipliers per subset of constraints).
-  Putinar handles every practical bounded constraint set.
-- Counter-example generation. SOS only emits "yes" answers; `by sos`
-  falls through silently on out-of-fragment goals.
 
 ## Licence
 
