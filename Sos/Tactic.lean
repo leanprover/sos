@@ -9,6 +9,7 @@ import Sos.Search
 import Sos.Verifier
 import Lean.ToExpr
 import Lean.Elab.Tactic
+import Lean.Meta.Tactic.TryThis
 import Mathlib.Tactic.Ring
 import Mathlib.Tactic.NormNum
 
@@ -351,6 +352,128 @@ elab_rules : tactic
         -- Convert the `decide ... = true` to a `0 < ε` proof via `of_decide_eq_true`.
         let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
         closeStrictSos parsed certE εE hεProof
+
+/-! ### `sos?` — Try-this suggestion for the inline witness form
+
+Produces a "Try this: sos_witness <cert>" suggestion where `<cert>`
+is a literal `Sos.Certificate` value matching what the search just
+produced, decompiled to a clean `CMvPolynomial`-form. The user can
+click the suggestion to replace `sos?` in their source. -/
+
+/-- Render a single `Sos.Poly n` as a Lean source string using
+`CMvPolynomial.X` / `CMvPolynomial.C` and the standard arithmetic
+operators. Strips redundant `0 + …`, `1 * …`, and `…^1` that arise
+from `Sos.Poly.decompile`'s normal form. -/
+private partial def formatPoly {n : Nat} (p : Sos.Poly n)
+    (parenIfComposite : Bool := false) : String :=
+  -- Simplifications applied before formatting, preserving semantics:
+  --   (const 0) + q        → q
+  --   p + (const 0)        → p
+  --   (const 1) * q        → q
+  --   p * (const 1)        → p
+  --   p ^ 1                → p
+  match p with
+  | .add (.const r) q =>
+    if r = 0 then formatPoly q parenIfComposite
+    else formatComposite parenIfComposite
+      s!"CMvPolynomial.C {ratLit r} + {formatPoly q}"
+  | .add p (.const r) =>
+    if r = 0 then formatPoly p parenIfComposite
+    else formatComposite parenIfComposite
+      s!"{formatPoly p} + CMvPolynomial.C {ratLit r}"
+  | .add p q =>
+    formatComposite parenIfComposite s!"{formatPoly p} + {formatPoly q}"
+  | .sub p q =>
+    formatComposite parenIfComposite s!"{formatPoly p} - {formatPoly q true}"
+  | .mul (.const r) q =>
+    if r = 1 then formatPoly q parenIfComposite
+    else formatComposite parenIfComposite
+      s!"CMvPolynomial.C {ratLit r} * {formatPoly q true}"
+  | .mul p (.const r) =>
+    if r = 1 then formatPoly p parenIfComposite
+    else formatComposite parenIfComposite
+      s!"{formatPoly p true} * CMvPolynomial.C {ratLit r}"
+  | .mul p q =>
+    formatComposite parenIfComposite s!"{formatPoly p true} * {formatPoly q true}"
+  | .neg p =>
+    formatComposite parenIfComposite s!"-{formatPoly p true}"
+  | .pow p 1 => formatPoly p parenIfComposite
+  | .pow p k => formatComposite parenIfComposite s!"{formatPoly p true}^{k}"
+  | .const r => s!"CMvPolynomial.C {ratLit r}"
+  | .var i => s!"CMvPolynomial.X {i.val}"
+where
+  ratLit (r : Rat) : String :=
+    if r.den = 1 then s!"({r.num} : ℚ)"
+    else s!"(({r.num} : ℚ) / {r.den})"
+  formatComposite (parens : Bool) (s : String) : String :=
+    if parens then s!"({s})" else s
+
+private def formatSquares {n : Nat} (sqs : List (Sos.Poly n)) : String :=
+  "[" ++ ", ".intercalate (sqs.map (fun p => formatPoly p)) ++ "]"
+
+private def formatSigmasList {n : Nat}
+    (ds : List (List (Sos.Poly n))) : String :=
+  let entries := ds.map fun sqs => s!"\{ squares := {formatSquares sqs} }"
+  "[" ++ ", ".intercalate entries ++ "]"
+
+/-- Render a runtime `Sos.Certificate n` as a Lean source literal
+suitable as the argument to `sos_witness`. -/
+private def formatCertificate {n : Nat} (cert : Sos.Certificate n) : String :=
+  let σ₀_decomp : List (Sos.Poly n) :=
+    cert.sigma0.squares.map Sos.Poly.decompile
+  let σᵢ_decomp : List (List (Sos.Poly n)) :=
+    cert.sigmas.map (fun sd => sd.squares.map Sos.Poly.decompile)
+  s!"\{ sigma0 := \{ squares := {formatSquares σ₀_decomp} }, \
+     sigmas := {formatSigmasList σᵢ_decomp} }"
+
+syntax (name := sosTryTactic) "sos?" : tactic
+
+elab_rules : tactic
+  | `(tactic| sos?%$tk) => do
+    let mvarId ← Tactic.getMainGoal
+    let some parsed ← Sos.Reify.parseGoalFull mvarId |
+      throwError "sos?: goal not in supported fragment"
+    -- Run the same search the `sos` tactic uses, but stop at the
+    -- runtime `Certificate` and produce a `Try this:` suggestion
+    -- of `sos_witness <inline cert>`.
+    let certText? : IO (Option String) := do
+      match parsed.shape with
+      | .closed =>
+        let some pTree := parsed.goal_pTree | return none
+        let pCMv := Sos.Poly.toCMv pTree
+        let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+        let goal : Sos.Goal parsed.n := .closed pCMv
+        match (← Sos.Search.runSearch goal gsCMv) with
+        | some cert => return some (formatCertificate cert)
+        | none => return none
+      | .infeasible =>
+        let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+        let goal : Sos.Goal parsed.n := .infeasible
+        match (← Sos.Search.runSearch goal gsCMv) with
+        | some cert => return some (formatCertificate cert)
+        | none => return none
+      | .strict =>
+        let some pTree := parsed.goal_pTree | return none
+        let pCMv := Sos.Poly.toCMv pTree
+        let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+        match (← Sos.Search.runStrictSearch pCMv gsCMv) with
+        | some res => return some (formatCertificate res.cert)
+        | none => return none
+    match (← certText?) with
+    | none =>
+      throwError "sos?: search failed to find a certificate"
+    | some certText =>
+      let suggestion : String := s!"sos_witness {certText}"
+      -- Parse the suggestion string into a tactic `TSyntax` so the
+      -- `Try this:` widget renders the actual replacement text in
+      -- the message log (string-form suggestions only show the
+      -- header). The full tactic must round-trip through the parser.
+      match Lean.Parser.runParserCategory (← getEnv) `tactic suggestion with
+      | .ok stx =>
+        Lean.Meta.Tactic.TryThis.addSuggestion tk (⟨stx⟩ : TSyntax `tactic)
+      | .error err =>
+        throwError "sos?: failed to parse suggestion as tactic syntax: {err}"
+      throwError "sos?: see Try this suggestion"
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do

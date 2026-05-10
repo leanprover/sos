@@ -341,31 +341,45 @@ def tryDenominator (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n �
   if cert.checks goal gs then return some cert
   return none
 
+/-- Try a single SDP encoding (one choice of `useTraceCost`) and the
+denominator schedule. Returns `none` if CSDP fails or no rounding
+validates. -/
+private def tryOneSdp (target : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) (goal : Goal n)
+    (useTraceCost : Bool) : IO (Option (Certificate n)) := do
+  let (problem, blocks, _monos) := buildSdp target gs useTraceCost
+  if problem.b.size = 0 then
+    if target = 0 then
+      return some { sigma0 := { squares := [] },
+                    sigmas := gs.map fun _ => { squares := [] } }
+    else
+      return none
+  let sol := LeanCsdp.solve problem
+  if sol.ret ∉ [0, 3] then
+    return none
+  for d in niceDenominators do
+    if let some cert := tryDenominator target gs blocks sol d goal then
+      return some cert
+  return none
+
 /-- Closed-positivity / infeasibility search: produce a Certificate
 proving `target = σ₀ + Σᵢ σᵢ · gᵢ` for the chosen `target`. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (goal : Goal n) :
     IO (Option (Certificate n)) := do
-  -- Trace cost helps CSDP converge on rank-deficient closed/strict
-  -- problems but breaks the infeasibility encoding (CSDP declares
-  -- dual infeasibility on what is otherwise feasible). Disable it
-  -- for `.infeasible` goals.
-  let useTraceCost := match goal with
-    | .infeasible => false
-    | _ => true
-  let (problem, blocks, _monos) := buildSdp target gs useTraceCost
-  if problem.b.size = 0 then
-    -- No constraints (degenerate). Trivial cert if target = 0; otherwise no cert.
-    if target = 0 then
-      return some { sigma0 := { squares := [] }, sigmas := gs.map fun _ => { squares := [] } }
-    else
-      return none
-  let sol := LeanCsdp.solve problem
-  if sol.ret ∉ [0, 3] then
-    -- 0 = success; 3 = reduced accuracy (still usable). Anything else is failure.
-    return none
-  for d in niceDenominators do
-    if let some cert := tryDenominator target gs blocks sol d goal then
+  -- Cost-matrix strategies, in order. Trace minimisation gives CSDP
+  -- a well-defined central path on rank-deficient SDPs (Harrison's
+  -- HOL Light convention) but interacts badly with infeasibility
+  -- certificates and with some basis choices that include the
+  -- constant monomial. Pure feasibility (`c = []`) is CSDP's
+  -- standard mode and works on most non-boundary problems plus
+  -- infeasibility. Try whichever is more likely to succeed first
+  -- and fall back.
+  let strategies : List Bool := match goal with
+    | .infeasible => [false]
+    | _           => [true, false]
+  for useTraceCost in strategies do
+    if let some cert ← tryOneSdp target gs goal useTraceCost then
       return some cert
   return none
 

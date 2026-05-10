@@ -1,46 +1,84 @@
 /-
-Worked examples for the Sos library. Each end-state goal closes
-via `by sos` (search-driven): the elaborator parses the goal, calls
-CSDP via `Sos.Search.runSearch`, rounds the float Gram matrix to
-rationals via the LDLᵀ + Lagrange four-square pipeline, and
-dispatches the matching verifier soundness lemma. `by sos_witness
-<cert>` is also available for cases where the user wants to supply
-a hand-built certificate directly.
+Speed-test candidate set. Build target is wall-clock < 10s for the
+whole file on the kim-em/sos main toolchain.
 -/
 import Sos
 
 open Sos CPoly
 
-/-! ### `by sos`: closed positivity, strict positivity, infeasibility,
-multivariate, and constrained. -/
-
+-- 1. closed positivity, 1 var, deg 2 (smoke)
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
+
+-- 2. closed positivity, 1 var, deg 4
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^4 + 1 := by sos
+
+-- 3. perfect square (rank-1 boundary)
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0) + 1 := by sos
+
+-- 4. perfect square, multivariate, sign-mixed
+example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 - 2*(x 0)*(x 1) + (x 1)^2 := by sos
+
+-- 5. perfect square, multivariate
 example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by sos
+
+-- 6. (x²-1)² as deg-4 single-var
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^4 - 2*(x 0)^2 + 1 := by sos
+
+-- 7. cyclic Schur, 3 vars
+example : ∀ x : Fin 3 → ℝ,
+    0 ≤ (x 0)^2 + (x 1)^2 + (x 2)^2 - (x 0)*(x 1) - (x 1)*(x 2) - (x 0)*(x 2) := by sos
+
+-- 8. AM ≥ GM squared, 2 vars deg 4
+example : ∀ x : Fin 2 → ℝ, 0 ≤ ((x 0)^2 + (x 1)^2)^2 - 4*(x 0)^2*(x 1)^2 := by sos
+
+-- 9. strict positivity, 1 var deg 2
 example : ∀ x : Fin 1 → ℝ, 0 < (x 0)^2 + 1 := by sos
+
+-- 10. strict positivity, 1 var deg 4
+example : ∀ x : Fin 1 → ℝ, 0 < (x 0)^4 + 1 := by sos
+
+-- 11. strict positivity, 2 vars deg 2
+example : ∀ x : Fin 2 → ℝ, 0 < (x 0)^2 + (x 1)^2 + 1 := by sos
+
+-- 12. infeasibility, 1 var deg 2
 example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by sos
+
+-- 13. infeasibility, 1 var deg 4
+example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^4 + 1 ≤ 0) := by sos
+
+-- 14. constrained, cubic
+example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^3 + (x 0) := by sos
+
+-- 15. constrained, perfect-square modulo
 example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^2 - x 0 + 1/4 := by sos
 
-/-! ### Motzkin fall-through
+-- 16. constrained, multivariate
+example : ∀ x : Fin 2 → ℝ, 0 ≤ x 0 → 0 ≤ x 1 →
+    0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by sos
 
-The Motzkin polynomial `x⁴y² + x²y⁴ + 1 - 3x²y²` is non-negative
-over `ℝ²` but not a sum of squares (Hilbert 1888 / Motzkin 1967).
-`by sos` correctly fails to find a certificate; `fail_if_success`
-catches the failure so we close the outer `True`. -/
+-- 17. Cauchy–Schwarz: (a²+b²)(c²+d²) − (ac+bd)² ≥ 0  (rank 1, deg 4, 4 vars)
+example : ∀ x : Fin 4 → ℝ,
+    0 ≤ ((x 0)^2 + (x 1)^2) * ((x 2)^2 + (x 3)^2)
+        - ((x 0)*(x 2) + (x 1)*(x 3))^2 := by sos
 
+-- 18. Motzkin fall-through (NOT SOS)
 example : True := by
   fail_if_success
     (have : ∀ x : Fin 2 → ℝ,
-        0 ≤ (x 0)^4 * (x 1)^2 + (x 0)^2 * (x 1)^4 + 1
-            - 3*(x 0)^2*(x 1)^2 := by sos)
+        0 ≤ (x 0)^4*(x 1)^2 + (x 0)^2*(x 1)^4 + 1 - 3*(x 0)^2*(x 1)^2 := by sos)
   trivial
 
-/-! ### `by sos_witness` is still available for direct cert supply. -/
+/-! ### `sos?` produces a `Try this:` suggestion of `sos_witness …` -/
 
-/-- The cert search produces this on its own; included as a sanity
-example of the witness path. -/
-def handCert_x2_plus_1 : Certificate 1 :=
-  { sigma0 := { squares := [CMvPolynomial.X 0, CMvPolynomial.C 1] },
-    sigmas := [] }
+/--
+info: Try this:
+  [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
+---
+error: sos?: see Try this suggestion
+-/
+#guard_msgs in
+example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos?
 
+-- And the suggested replacement compiles:
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by
-  sos_witness handCert_x2_plus_1
+  sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
