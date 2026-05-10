@@ -99,6 +99,55 @@ private def buildBridgeEq (n : Nat) (xE : Expr) (p : Sos.Poly n)
      all_goals (push_cast; ring)))
   proveByTactic eqType tac
 
+/-! ### Atomic-bridge helpers (new front-end)
+
+These build the `Fin n → ℝ` valuation expression `![atom₀, …,
+atomₙ₋₁]` from an atom array, and prove the bridge equation
+`pTyped.evalReal φ = origExpr` where `pTyped := raw.cast n h` and `φ
+:= ![…]`. The bridge proof reduces `φ ⟨k, _⟩` to `atom_k` via
+`Matrix.cons_val_*` simp lemmas. -/
+
+/-- Build `Expr` of type `Fin n → ℝ`, where `n = atoms.size`,
+defined by the vector literal `![atoms[0], …, atoms[n-1]]`
+(right-associated `Matrix.vecCons` chain ending in
+`Matrix.vecEmpty`). -/
+private def buildFinValExpr (atoms : Array Expr) : MetaM Expr := do
+  let realTy := Lean.mkConst ``Real
+  let n := atoms.size
+  -- Tail: `Matrix.vecEmpty : Fin 0 → ℝ`.
+  let mut acc : Expr ←
+    mkAppOptM ``Matrix.vecEmpty #[some realTy]
+  -- Right-to-left: the leftmost atom is the outermost cons. After
+  -- pushing `k` atoms, `acc : Fin k → ℝ`. The next push prepends
+  -- `atoms[n-1-k]`.
+  for k in [:n] do
+    let i := n - 1 - k
+    let m := Lean.mkNatLit k  -- current length of `acc`
+    acc ← mkAppOptM ``Matrix.vecCons
+      #[some realTy, some m, some atoms[i]!, some acc]
+  return acc
+
+/-- Meta-compute the typed `Sos.Poly n` from a `Sos.Poly.Raw` whose
+`maxAtomBound ≤ n`. The boundedness is decided at meta-time. Returns
+`none` if the bound check fails. -/
+private def castRawToPoly (raw : Sos.Poly.Raw) (n : Nat) :
+    Option (Sos.Poly n) :=
+  if h : raw.maxAtomBound ≤ n then some (raw.cast n h) else none
+
+/-- Prove `Sos.Poly.evalReal φ p = origExpr` where `φ` is the
+`![atoms[0], …]` vector. The proof uses `Sos.Poly.evalReal` plus
+`Matrix.cons_val_*` to reduce `φ ⟨k, _⟩` for each literal `k`. -/
+private def buildAtomicBridgeEq (n : Nat) (φE : Expr) (p : Sos.Poly n)
+    (origExpr : Expr) : TacticM Expr := do
+  let lhs ← evalRealExpr n φE p
+  let eqType ← mkEq lhs origExpr
+  let tac ← `(tactic|
+    (simp only [Sos.Poly.evalReal, Matrix.cons_val_zero,
+       Matrix.cons_val_succ, Matrix.cons_val_zero',
+       Matrix.cons_val_succ', Fin.isValue]
+     all_goals (push_cast; ring)))
+  proveByTactic eqType tac
+
 /-! ### Closed-positivity proof builder -/
 
 /-- Build the `List (CMvPolynomial n ℚ)` expression
@@ -287,6 +336,140 @@ def closeInfeasibleSos (parsed : Sos.Reify.ParsedGoal)
     mv.assign infeasibleProof
     Tactic.replaceMainGoal []
 
+/-! ### Atomic close*Sos (new front-end)
+
+Versions of `close{Closed,Strict,Infeasible}Sos` that consume an
+`AtomicParsedGoal`. The parser has already done all intros; these
+helpers read the atom Exprs, meta-cast `rawConcl`/`rawGs` into
+`Sos.Poly atoms.size`, build the vector valuation, and apply the
+soundness lemma. -/
+
+/-- Build per-hypothesis bridged proofs `0 ≤ aeval φ g_i.toCMv` from
+the AtomicParsedGoal's hFVars, using `aeval_nonneg_of_orig` (or
+`_neg` for `.nonpos`). -/
+private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
+    (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
+    (gsKinds : List Sos.Reify.ConstraintKind) (hFVars : Array FVarId) :
+    TacticM (List Expr × List (Sos.Poly n)) := do
+  let nE := Lean.mkNatLit n
+  let mut acc : List Expr := []
+  let mut polys : List (Sos.Poly n) := []
+  for i in [:rawGs.length] do
+    let raw := rawGs[i]!
+    let some gTree := castRawToPoly raw n |
+      throwError "sos: constraint poly's maxAtomBound exceeds n = {n}"
+    let origExpr := origGs[i]!
+    let kind := gsKinds[i]!
+    let hFVar := hFVars[i]!
+    let hExpr := Lean.mkFVar hFVar
+    let gE := Lean.toExpr gTree
+    polys := polys ++ [gTree]
+    match kind with
+    | .nonneg =>
+      let eqProof ← buildAtomicBridgeEq n φE gTree origExpr
+      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig
+        #[some nE, some φE, some gE, some origExpr,
+          some eqProof, some hExpr]
+      acc := acc ++ [aProof]
+    | .nonpos =>
+      -- gTree's evalReal yields `-origExpr` because the reifier
+      -- already wrapped the orig poly in `Raw.neg`.
+      let negOrig ← mkAppM ``Neg.neg #[origExpr]
+      let eqProof ← buildAtomicBridgeEq n φE gTree negOrig
+      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig_neg
+        #[some nE, some φE, some gE, some origExpr,
+          some eqProof, some hExpr]
+      acc := acc ++ [aProof]
+  return (acc, polys)
+
+/-- Closed-positivity close. -/
+def closeClosedSosA (parsed : Sos.Reify.AtomicParsedGoal)
+    (certE : Expr) : TacticM Unit := Tactic.withMainContext do
+  let some rawConcl := parsed.rawConcl |
+    throwError "sos (closed): missing rawConcl"
+  let some origConcl := parsed.origConcl |
+    throwError "sos (closed): missing origConcl"
+  let n := parsed.atoms.size
+  let some pTree := castRawToPoly rawConcl n |
+    throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
+  let mv ← Tactic.getMainGoal
+  let φE ← buildFinValExpr parsed.atoms
+  let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
+    parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
+  let gsListE ← gsCMvListExpr n gPolys
+  let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
+  let pCMv ← toCMvExpr n pTree
+  let goalE ← mkAppOptM ``Sos.Goal.closed
+    #[some (Lean.mkNatLit n), some pCMv]
+  let checksE ← mkAppM ``Sos.Certificate.checks #[certE, goalE, gsListE]
+  let trueE ← mkAppOptM ``Bool.true #[]
+  let decType ← mkEq checksE trueE
+  let decProof ← buildDecideTrue decType
+  let hTarget ← mkAppM ``Sos.sos_sound
+    #[pCMv, gsListE, certE, decProof, φE, hgsProof]
+  let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
+  let pE := Lean.toExpr pTree
+  let final ← mkAppOptM ``Sos.nonneg_orig_of_aeval
+    #[some (Lean.mkNatLit n), some φE, some pE, some origConcl,
+      some eqProof_p, some hTarget]
+  mv.assign final
+  Tactic.replaceMainGoal []
+
+/-- Strict-positivity close. -/
+def closeStrictSosA (parsed : Sos.Reify.AtomicParsedGoal)
+    (certE : Expr) (εE : Expr) (hεE : Expr) : TacticM Unit :=
+    Tactic.withMainContext do
+  let some rawConcl := parsed.rawConcl |
+    throwError "sos (strict): missing rawConcl"
+  let some origConcl := parsed.origConcl |
+    throwError "sos (strict): missing origConcl"
+  let n := parsed.atoms.size
+  let some pTree := castRawToPoly rawConcl n |
+    throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
+  let mv ← Tactic.getMainGoal
+  let φE ← buildFinValExpr parsed.atoms
+  let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
+    parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
+  let gsListE ← gsCMvListExpr n gPolys
+  let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
+  let pCMv ← toCMvExpr n pTree
+  let goalE ← mkAppOptM ``Sos.Goal.strict
+    #[some (Lean.mkNatLit n), some pCMv, some εE, some hεE]
+  let checksE ← mkAppM ``Sos.Certificate.checks #[certE, goalE, gsListE]
+  let trueE ← mkAppOptM ``Bool.true #[]
+  let decType ← mkEq checksE trueE
+  let decProof ← buildDecideTrue decType
+  let hTarget ← mkAppM ``Sos.sos_strict_sound
+    #[pCMv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
+  let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
+  let pE := Lean.toExpr pTree
+  let final ← mkAppOptM ``Sos.pos_orig_of_aeval
+    #[some (Lean.mkNatLit n), some φE, some pE, some origConcl,
+      some eqProof_p, some hTarget]
+  mv.assign final
+  Tactic.replaceMainGoal []
+
+/-- Infeasibility close. The conclusion is `False`; the goal becomes
+`<gᵢ_constraints> → False` after intros. -/
+def closeInfeasibleSosA (parsed : Sos.Reify.AtomicParsedGoal)
+    (certE : Expr) : TacticM Unit := Tactic.withMainContext do
+  let n := parsed.atoms.size
+  let mv ← Tactic.getMainGoal
+  let φE ← buildFinValExpr parsed.atoms
+  let (hAevalProofs, gPolys) ← buildHypothesisAevalProofsA n φE
+    parsed.rawGs parsed.origGs parsed.gsKinds parsed.hFVars
+  let gsListE ← gsCMvListExpr n gPolys
+  let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
+  let goalE ← mkAppOptM ``Sos.Goal.infeasible #[some (Lean.mkNatLit n)]
+  let checksE ← mkAppM ``Sos.Certificate.checks #[certE, goalE, gsListE]
+  let trueE ← mkAppOptM ``Bool.true #[]
+  let decType ← mkEq checksE trueE
+  let decProof ← buildDecideTrue decType
+  let infeasibleProof ← mkAppM ``Sos.sos_infeasible_sound
+    #[gsListE, certE, decProof, φE, hgsProof]
+  mv.assign infeasibleProof
+  Tactic.replaceMainGoal []
+
 /-! ### Tactic surface -/
 
 syntax (name := sosTactic) "sos" : tactic
@@ -305,53 +488,59 @@ private def certExprOfRuntime (n : Nat) (cert : Sos.Certificate n) : MetaM Expr 
   mkAppOptM ``Sos.Certificate.fromDecompiled
     #[some (Lean.mkNatLit n), some sigma0E, some sigmasE]
 
+/-- Helper: cast rawGs to typed Poly n. -/
+private def castGs (rawGs : List Sos.Poly.Raw) (n : Nat) :
+    TacticM (List (Sos.Poly n)) := do
+  let mut acc : List (Sos.Poly n) := []
+  for raw in rawGs do
+    let some gT := castRawToPoly raw n |
+      throwError "sos: constraint poly's maxAtomBound > n = {n}"
+    acc := acc ++ [gT]
+  return acc
+
 elab_rules : tactic
   | `(tactic| sos) => do
-    let mvarId ← Tactic.getMainGoal
-    let some parsed ← Sos.Reify.parseGoalFull mvarId |
+    let some parsed ← Sos.Reify.parseGoalAtomic |
       throwError "sos: goal not in supported fragment"
+    let n := parsed.atoms.size
+    let gPolys ← castGs parsed.rawGs n
+    let gsCMv := gPolys.map Sos.Poly.toCMv
     match parsed.shape with
     | .closed =>
-      let some pTree := parsed.goal_pTree |
-        throwError "sos (closed): missing goal_pTree"
-      let pCMv := Sos.Poly.toCMv pTree
-      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
-      let goal : Sos.Goal parsed.n := .closed pCMv
-      let cert? ← (Sos.Search.runSearch goal gsCMv : IO _)
-      match cert? with
+      let some rawConcl := parsed.rawConcl |
+        throwError "sos (closed): missing rawConcl"
+      let some pTree := castRawToPoly rawConcl n |
+        throwError "sos: conclusion's maxAtomBound > n = {n}"
+      let goal : Sos.Goal n := .closed pTree.toCMv
+      match (← (Sos.Search.runSearch goal gsCMv : IO _)) with
       | none => throwError "sos: search failed to find a certificate"
       | some cert =>
-        let certE ← certExprOfRuntime parsed.n cert
-        closeClosedSos parsed certE
+        let certE ← certExprOfRuntime n cert
+        closeClosedSosA parsed certE
     | .infeasible =>
-      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
-      let goal : Sos.Goal parsed.n := .infeasible
-      let cert? ← (Sos.Search.runSearch goal gsCMv : IO _)
-      match cert? with
+      let goal : Sos.Goal n := .infeasible
+      match (← (Sos.Search.runSearch goal gsCMv : IO _)) with
       | none => throwError "sos: search failed to find an infeasibility certificate"
       | some cert =>
-        let certE ← certExprOfRuntime parsed.n cert
-        closeInfeasibleSos parsed certE
+        let certE ← certExprOfRuntime n cert
+        closeInfeasibleSosA parsed certE
     | .strict =>
-      let some pTree := parsed.goal_pTree |
-        throwError "sos (strict): missing goal_pTree"
-      let pCMv := Sos.Poly.toCMv pTree
-      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
-      let res? ← (Sos.Search.runStrictSearch pCMv gsCMv : IO _)
-      match res? with
+      let some rawConcl := parsed.rawConcl |
+        throwError "sos (strict): missing rawConcl"
+      let some pTree := castRawToPoly rawConcl n |
+        throwError "sos: conclusion's maxAtomBound > n = {n}"
+      match (← (Sos.Search.runStrictSearch pTree.toCMv gsCMv : IO _)) with
       | none => throwError "sos: search failed to find a strict-positivity certificate"
       | some res =>
-        let certE ← certExprOfRuntime parsed.n res.cert
+        let certE ← certExprOfRuntime n res.cert
         let εE := Lean.toExpr res.ε
-        -- Discharge `0 < res.ε` via `decide`.
         let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
           #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
         let hεE ← buildDecideTrue (← mkEq
           (← mkAppOptM ``Decidable.decide #[some hεType, none])
           (Lean.mkConst ``Bool.true))
-        -- Convert the `decide ... = true` to a `0 < ε` proof via `of_decide_eq_true`.
         let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
-        closeStrictSos parsed certE εE hεProof
+        closeStrictSosA parsed certE εE hεProof
 
 /-! ### `sos?` — Try-this suggestion for the inline witness form
 
