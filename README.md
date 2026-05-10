@@ -16,12 +16,17 @@ close automatically:
 
 ```lean
 import Sos
-example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos
-example : ∀ x : Fin 2 → ℝ, 0 ≤ (x 0)^2 + 2*(x 0)*(x 1) + (x 1)^2 := by sos
-example : ∀ x : Fin 1 → ℝ, 0 < (x 0)^2 + 1 := by sos
-example : ∀ x : Fin 1 → ℝ, ¬ ((x 0)^2 + 1 ≤ 0) := by sos
-example : ∀ x : Fin 1 → ℝ, 0 ≤ x 0 → 0 ≤ (x 0)^2 - x 0 + 1/4 := by sos
+example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
+example (x y : ℝ) : 0 ≤ x^2 + 2*x*y + y^2 := by sos
+example (x : ℝ) : 0 < x^2 + 1 := by sos
+example (x : ℝ) : ¬ (x^2 + 1 ≤ 0) := by sos
+example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 - x + 1/4 := by sos
 ```
+
+Atoms are recovered as arbitrary `ℝ`-typed subterms (free variables,
+function applications, projections — anything the reifier doesn't
+recognise as a known operator). Constraint hypotheses can come from
+the local context or from `→`-introduced binders.
 
 The Motzkin polynomial `x⁴y² + x²y⁴ + 1 - 3x²y²` is non-negative but
 not a sum of squares (Hilbert 1888 / Motzkin 1967); `by sos`
@@ -31,9 +36,8 @@ correctly fails to find a certificate, caught here by
 ```lean
 example : True := by
   fail_if_success
-    (have : ∀ x : Fin 2 → ℝ,
-        0 ≤ (x 0)^4 * (x 1)^2 + (x 0)^2 * (x 1)^4 + 1
-            - 3*(x 0)^2*(x 1)^2 := by sos)
+    (have : ∀ x y : ℝ,
+        0 ≤ x^4 * y^2 + x^2 * y^4 + 1 - 3*x^2*y^2 := by sos)
   trivial
 ```
 
