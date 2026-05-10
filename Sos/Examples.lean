@@ -73,8 +73,6 @@ example : True := by
 /--
 info: Try this:
   [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
----
-error: sos?: see Try this suggestion
 -/
 #guard_msgs in
 example : ∀ x : Fin 1 → ℝ, 0 ≤ (x 0)^2 + 1 := by sos?

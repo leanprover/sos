@@ -428,52 +428,65 @@ private def formatCertificate {n : Nat} (cert : Sos.Certificate n) : String :=
 
 syntax (name := sosTryTactic) "sos?" : tactic
 
+/-- Emit the `Try this:` suggestion for a found certificate. -/
+private def emitSosSuggestion (tk : Syntax) (certText : String) : TacticM Unit := do
+  let suggestion : String := s!"sos_witness {certText}"
+  match Lean.Parser.runParserCategory (← getEnv) `tactic suggestion with
+  | .ok stx =>
+    Lean.Meta.Tactic.TryThis.addSuggestion tk (⟨stx⟩ : TSyntax `tactic)
+  | .error err =>
+    throwError "sos?: failed to parse suggestion as tactic syntax: {err}"
+
 elab_rules : tactic
   | `(tactic| sos?%$tk) => do
     let mvarId ← Tactic.getMainGoal
     let some parsed ← Sos.Reify.parseGoalFull mvarId |
       throwError "sos?: goal not in supported fragment"
-    -- Run the same search the `sos` tactic uses, but stop at the
-    -- runtime `Certificate` and produce a `Try this:` suggestion
-    -- of `sos_witness <inline cert>`.
-    let certText? : IO (Option String) := do
-      match parsed.shape with
-      | .closed =>
-        let some pTree := parsed.goal_pTree | return none
-        let pCMv := Sos.Poly.toCMv pTree
-        let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
-        let goal : Sos.Goal parsed.n := .closed pCMv
-        match (← Sos.Search.runSearch goal gsCMv) with
-        | some cert => return some (formatCertificate cert)
-        | none => return none
-      | .infeasible =>
-        let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
-        let goal : Sos.Goal parsed.n := .infeasible
-        match (← Sos.Search.runSearch goal gsCMv) with
-        | some cert => return some (formatCertificate cert)
-        | none => return none
-      | .strict =>
-        let some pTree := parsed.goal_pTree | return none
-        let pCMv := Sos.Poly.toCMv pTree
-        let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
-        match (← Sos.Search.runStrictSearch pCMv gsCMv) with
-        | some res => return some (formatCertificate res.cert)
-        | none => return none
-    match (← certText?) with
-    | none =>
-      throwError "sos?: search failed to find a certificate"
-    | some certText =>
-      let suggestion : String := s!"sos_witness {certText}"
-      -- Parse the suggestion string into a tactic `TSyntax` so the
-      -- `Try this:` widget renders the actual replacement text in
-      -- the message log (string-form suggestions only show the
-      -- header). The full tactic must round-trip through the parser.
-      match Lean.Parser.runParserCategory (← getEnv) `tactic suggestion with
-      | .ok stx =>
-        Lean.Meta.Tactic.TryThis.addSuggestion tk (⟨stx⟩ : TSyntax `tactic)
-      | .error err =>
-        throwError "sos?: failed to parse suggestion as tactic syntax: {err}"
-      throwError "sos?: see Try this suggestion"
+    -- Run the same search the `sos` tactic uses, then both close the
+    -- goal AND emit a `Try this:` suggestion of `sos_witness <inline
+    -- cert>`. The build is silent on success — projects that demand
+    -- no warnings see no warnings; the suggestion is delivered as an
+    -- info message and as a clickable widget in the IDE.
+    match parsed.shape with
+    | .closed =>
+      let some pTree := parsed.goal_pTree |
+        throwError "sos? (closed): missing goal_pTree"
+      let pCMv := Sos.Poly.toCMv pTree
+      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+      let goal : Sos.Goal parsed.n := .closed pCMv
+      match (← (Sos.Search.runSearch goal gsCMv : IO _)) with
+      | none => throwError "sos?: search failed to find a certificate"
+      | some cert =>
+        emitSosSuggestion tk (formatCertificate cert)
+        let certE ← certExprOfRuntime parsed.n cert
+        closeClosedSos parsed certE
+    | .infeasible =>
+      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+      let goal : Sos.Goal parsed.n := .infeasible
+      match (← (Sos.Search.runSearch goal gsCMv : IO _)) with
+      | none => throwError "sos?: search failed to find an infeasibility certificate"
+      | some cert =>
+        emitSosSuggestion tk (formatCertificate cert)
+        let certE ← certExprOfRuntime parsed.n cert
+        closeInfeasibleSos parsed certE
+    | .strict =>
+      let some pTree := parsed.goal_pTree |
+        throwError "sos? (strict): missing goal_pTree"
+      let pCMv := Sos.Poly.toCMv pTree
+      let gsCMv := parsed.gs_pTrees.map Sos.Poly.toCMv
+      match (← (Sos.Search.runStrictSearch pCMv gsCMv : IO _)) with
+      | none => throwError "sos?: search failed to find a strict-positivity certificate"
+      | some res =>
+        emitSosSuggestion tk (formatCertificate res.cert)
+        let certE ← certExprOfRuntime parsed.n res.cert
+        let εE := Lean.toExpr res.ε
+        let hεType ← mkAppM ``LT.lt #[(← mkAppOptM ``OfNat.ofNat
+          #[some (Lean.mkConst ``Rat), some (Lean.mkNatLit 0), none]), εE]
+        let hεE ← buildDecideTrue (← mkEq
+          (← mkAppOptM ``Decidable.decide #[some hεType, none])
+          (Lean.mkConst ``Bool.true))
+        let hεProof ← mkAppM ``of_decide_eq_true #[hεE]
+        closeStrictSos parsed certE εE hεProof
 
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => do
