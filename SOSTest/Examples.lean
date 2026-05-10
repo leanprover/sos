@@ -82,3 +82,16 @@ example (x : ℝ) : 0 ≤ x^2 + 1 := by sos?
 -- And the suggested replacement compiles:
 example (x : ℝ) : 0 ≤ x^2 + 1 := by
   sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
+
+/-! ### Strict positivity: `sos?` suggestion includes `with ε := …` -/
+
+/--
+info: Try this:
+  [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.X 0] }, sigmas := [] } with ε := (1 : ℚ)
+-/
+#guard_msgs in
+example (x : ℝ) : 0 < x^2 + 1 := by sos?
+
+-- And the suggested replacement compiles:
+example (x : ℝ) : 0 < x^2 + 1 := by
+  sos_witness { sigma0 := { squares := [CMvPolynomial.X 0] }, sigmas := [] } with ε := (1 : ℚ)
