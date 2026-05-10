@@ -187,7 +187,7 @@ Builds `0 ≤ aeval φ g_i.toCMv` from the parser's hypothesis FVars,
 dispatching on `ConstraintKind`. -/
 
 /-- Build per-hypothesis bridged proofs `0 ≤ aeval φ g_i.toCMv` from
-the AtomicParsedGoal's hFVars, using `aeval_nonneg_of_orig` (or
+the ParsedGoal's hFVars, using `aeval_nonneg_of_orig` (or
 `_neg` for `.nonpos`). -/
 private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
     (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
@@ -233,7 +233,7 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
   return (acc, polys)
 
 /-- Closed-positivity close. -/
-def closeClosedSosA (parsed : Sos.Reify.AtomicParsedGoal)
+def closeClosedSosA (parsed : Sos.Reify.ParsedGoal)
     (certE : Expr) : TacticM Unit := Tactic.withMainContext do
   let some rawConcl := parsed.rawConcl |
     throwError "sos (closed): missing rawConcl"
@@ -266,7 +266,7 @@ def closeClosedSosA (parsed : Sos.Reify.AtomicParsedGoal)
   Tactic.replaceMainGoal []
 
 /-- Strict-positivity close. -/
-def closeStrictSosA (parsed : Sos.Reify.AtomicParsedGoal)
+def closeStrictSosA (parsed : Sos.Reify.ParsedGoal)
     (certE : Expr) (εE : Expr) (hεE : Expr) : TacticM Unit :=
     Tactic.withMainContext do
   let some rawConcl := parsed.rawConcl |
@@ -301,7 +301,7 @@ def closeStrictSosA (parsed : Sos.Reify.AtomicParsedGoal)
 
 /-- Infeasibility close. The conclusion is `False`; the goal becomes
 `<gᵢ_constraints> → False` after intros. -/
-def closeInfeasibleSosA (parsed : Sos.Reify.AtomicParsedGoal)
+def closeInfeasibleSosA (parsed : Sos.Reify.ParsedGoal)
     (certE : Expr) : TacticM Unit := Tactic.withMainContext do
   let n := parsed.atoms.size
   let mv ← Tactic.getMainGoal

@@ -84,8 +84,10 @@ Relative dual infeasibility: 5.00e-11
 ## Architecture
 
 ```
-goal expression  ── Sos.Reify.parseGoalFull ──▶  ParsedGoal
-                                                       │
+goal expression  ── Sos.Reify.parseGoalAtomic ─▶  ParsedGoal
+                                                       │  (atoms : Array Expr,
+                                                       │   rawConcl, rawGs : Sos.Poly.Raw,
+                                                       │   hFVars from intro / lctx scan)
                                                        ▼
                                               Sos.Search.runSearch
                                                        │
@@ -97,9 +99,9 @@ goal expression  ── Sos.Reify.parseGoalFull ──▶  ParsedGoal
                                               Sos.Certificate n  (validated)
                                                        │
                                                        ▼
-                                          Sos.Tactic.closeClosedSos /
-                                          closeStrictSos /
-                                          closeInfeasibleSos
+                                          Sos.Tactic.closeClosedSosA /
+                                          closeStrictSosA /
+                                          closeInfeasibleSosA
                                                        │
                                                        ▼
                                                 ℝ-level proof
@@ -113,7 +115,7 @@ goal expression  ── Sos.Reify.parseGoalFull ──▶  ParsedGoal
 | `Sos.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound`, plus `aeval_*` and `evalReal_eq_aeval` bridge lemmas. |
 | `Sos.LDL` | Rational LDLᵀ, Lagrange 4-square, Gram→SOS reconstruction. |
 | `Sos.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop, ε-schedule for strict positivity. |
-| `Sos.Reify` | Lean-`Expr` walker → `ParsedGoal` (typed AST + abstracted-over-`x` original Expr per polynomial). |
+| `Sos.Reify` | Atom-collecting Lean-`Expr` walker → `ParsedGoal` (atom array, untyped `Sos.Poly.Raw` for conclusion + constraints, hypothesis FVars). |
 | `Sos.Tactic` | `by sos` (search-driven) and `by sos_witness <cert>` elaborators. |
 | `Sos.Examples` | Worked examples invoking the tactic. |
 | `Sos.Smoke` | Programmatic smoke test built as the `sos-example` lean_exe. |

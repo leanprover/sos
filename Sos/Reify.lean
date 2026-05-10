@@ -184,7 +184,7 @@ leave the local context polluted with introduced binders.
 /-- Output of `parseGoalAtomic`. The reified polynomials are kept as
 untyped `Sos.Poly.Raw`; the elaborator casts them to `Sos.Poly n` at
 `n = atoms.size` via `Raw.cast`. -/
-structure AtomicParsedGoal where
+structure ParsedGoal where
   /-- Atom Exprs collected from the conclusion and constraints. -/
   atoms    : Array Expr
   /-- Coarse shape of the conclusion. -/
@@ -263,7 +263,7 @@ def recogniseConstraint (h : Expr) (atoms : Array Expr) :
 partial def parseGoalAtomicAux
     (atoms : Array Expr) (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
     (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
-    Tactic.TacticM (Option AtomicParsedGoal) := Tactic.withMainContext do
+    Tactic.TacticM (Option ParsedGoal) := Tactic.withMainContext do
   let mv ← Tactic.getMainGoal
   let goalType ← mv.getType >>= instantiateMVars
   -- Step 1: try a recognised-conclusion match first.
@@ -297,7 +297,7 @@ where
   tryReifyConclusion (goalType : Expr) (atoms : Array Expr)
       (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
       (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
-      Tactic.TacticM (Option AtomicParsedGoal) := do
+      Tactic.TacticM (Option ParsedGoal) := do
     let goalType ← whnfR goalType
     match_expr goalType with
     | LE.le _ _ a b =>
@@ -324,7 +324,7 @@ where
   tryConstraintIntro (goalType : Expr) (atoms : Array Expr)
       (rawGs : List Sos.Poly.Raw) (origGs : List Lean.Expr)
       (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
-      Tactic.TacticM (Option AtomicParsedGoal) := do
+      Tactic.TacticM (Option ParsedGoal) := do
     let .forallE _ hypType body _ := goalType | return none
     unless !body.hasLooseBVars do return none
     let some (kind, rawG, origG, atoms') ← recogniseConstraint hypType atoms |
@@ -350,8 +350,8 @@ where
 /-- Scan the local context for hypothesis FVars matching a constraint
 shape, and merge them into `pg`. Skips FVars already in `pg.hFVars`
 (intro'd by the iterative parser) and FVars whose type isn't `Prop`. -/
-def mergeLocalCtxConstraints (pg : AtomicParsedGoal) :
-    Tactic.TacticM AtomicParsedGoal := Tactic.withMainContext do
+def mergeLocalCtxConstraints (pg : ParsedGoal) :
+    Tactic.TacticM ParsedGoal := Tactic.withMainContext do
   let mut atoms := pg.atoms
   let mut rawGs := pg.rawGs
   let mut origGs := pg.origGs
@@ -375,7 +375,7 @@ def mergeLocalCtxConstraints (pg : AtomicParsedGoal) :
 hypotheses, scans the local context for additional constraint
 hypotheses, then returns the parsed goal. Returns `none` if the
 conclusion isn't in the supported fragment. -/
-def parseGoalAtomic : Tactic.TacticM (Option AtomicParsedGoal) := do
+def parseGoalAtomic : Tactic.TacticM (Option ParsedGoal) := do
   let st ← Tactic.saveState
   match ← parseGoalAtomicAux #[] [] [] [] #[] with
   | some out => return some (← mergeLocalCtxConstraints out)
