@@ -58,13 +58,19 @@ the position pushed earliest into `acc` becomes the outermost (slowest-
 varying) coordinate after the final reverse — i.e. the result list is
 ordered with the first coordinate varying fastest, matching the
 deterministic order callers depended on. -/
-private partial def weakCompositionsAux :
-    Nat → Nat → Array Nat → Array (Array Nat) → Array (Array Nat)
-  | 0, _, acc, results => results.push acc.reverse
-  | k+1, budget, acc, results => Id.run do
+private partial def monomialsUpToAux (n : Nat) :
+    (k : Nat) → Nat → (acc : Array Nat) → acc.size + k = n →
+      Array (CMvMonomial n) → Array (CMvMonomial n)
+  | 0, _, acc, h, results =>
+    results.push ⟨acc.reverse, by
+      simp at h ⊢
+      omega⟩
+  | k+1, budget, acc, h, results => Id.run do
     let mut results := results
     for e in [0:budget+1] do
-      results := weakCompositionsAux k (budget - e) (acc.push e) results
+      results := monomialsUpToAux n k (budget - e) (acc.push e) (by
+        simp at h ⊢
+        omega) results
     return results
 
 /-- All monomials in `n` variables of total degree ≤ `d`, in
@@ -74,8 +80,7 @@ Cardinality is `C(n+d, d)` — recursion enumerates only valid
 compositions, in contrast to the previous `(d+1)^n`-then-filter
 approach that exploded with moderate variable counts. -/
 def monomialsUpTo (n d : Nat) : Array (CMvMonomial n) :=
-  (weakCompositionsAux n d #[] #[]).map fun arr =>
-    if h : arr.size = n then ⟨arr, h⟩ else default
+  monomialsUpToAux n n d #[] (by simp) #[]
 
 /-! ### Multiplier basis sizing -/
 
@@ -143,11 +148,11 @@ def buildBlocks (target : CMvPolynomial n ℚ)
 /-! ### Polynomial product accessors -/
 
 /-- For block `b`, compute the polynomial `z_b[j] · z_b[k] · g_b`. -/
-def blockProduct (block : BlockSpec n) (j k : Nat) : CMvPolynomial n ℚ :=
+private def blockProduct (block : BlockSpec n) (j k : Nat) : CMvPolynomial n ℚ :=
   let mj : CMvPolynomial n ℚ :=
-    CMvPolynomial.monomial (block.basis.getD j (zeroMono n)) (1 : ℚ)
+    CMvPolynomial.monomial block.basis[j]! (1 : ℚ)
   let mk : CMvPolynomial n ℚ :=
-    CMvPolynomial.monomial (block.basis.getD k (zeroMono n)) (1 : ℚ)
+    CMvPolynomial.monomial block.basis[k]! (1 : ℚ)
   mj * mk * block.multiplier
 
 /-! ### Cached block products
@@ -299,29 +304,33 @@ def niceRound (d : ℚ) (x : Float) : ℚ :=
 `Array ℚ` after rational rounding. The CSDP `.sdp` block stores
 column-major, so element `(row, col)` is at index `col * n + row`. -/
 def decodeSdpBlock (denom : ℚ) (n : Nat) (entries : FloatArray) :
-    Array ℚ := Id.run do
+    Option (Array ℚ) := Id.run do
+  if entries.size ≠ n * n then return none
   let mut acc : Array ℚ := #[]
   for i in [0:n] do
     for j in [i:n] do
       let v := entries.get! (j * n + i)
       acc := acc.push (niceRound denom v)
-  return acc
+  return some acc
 
 /-- Decode the full primal solution into per-block rational Gram matrices. -/
 def decodeSolution (sol : LeanCsdp.Solution) (denom : ℚ) :
-    Array (Array ℚ) := Id.run do
+    Option (Array (Array ℚ)) := Id.run do
   let mut acc : Array (Array ℚ) := #[]
   for b in sol.X do
     match b with
-    | .sdp n entries => acc := acc.push (decodeSdpBlock denom n entries)
+    | .sdp n entries =>
+      let some block := decodeSdpBlock denom n entries | return none
+      acc := acc.push block
     | .diag n entries =>
+      if entries.size ≠ n then return none
       -- Diagonal block: extract just the n diagonal entries (each in its
       -- own 1×1 sub-Gram in the upper-triangle convention).
       let mut diag : Array ℚ := #[]
       for i in [0:n] do
         diag := diag.push (niceRound denom (entries.get! i))
       acc := acc.push diag
-  return acc
+  return some acc
 
 /-! ### Top-level search driver -/
 
@@ -336,18 +345,19 @@ build a Certificate, check it. Returns `none` if any step fails. -/
 def tryDenominator (gs : List (CMvPolynomial n ℚ))
     (blocks : Array (BlockSpec n)) (sol : LeanCsdp.Solution) (denom : ℚ)
     (goal : Goal n) : Option (Certificate n) := Id.run do
-  let Qs := decodeSolution sol denom
+  let some Qs := decodeSolution sol denom | return none
   if Qs.size ≠ blocks.size then return none
   -- Reconstruct σ₀ from block 0.
-  let block0 := blocks.getD 0 default
+  let some block0 := blocks[0]? | return none
+  let some Q0 := Qs[0]? | return none
   let some sigma0Squares :=
-    LDL.reconstruct block0.size (Qs.getD 0 #[]) (basisAsPolys block0.basis)
+    LDL.reconstruct block0.size Q0 (basisAsPolys block0.basis)
     | return none
   -- Reconstruct each σᵢ from block i+1.
   let mut sigmas : Array (SOSDecomp n) := Array.mkEmpty (blocks.size - 1)
   for blockIdx in [1:blocks.size] do
-    let block := blocks.getD blockIdx default
-    let Q := Qs.getD blockIdx #[]
+    let some block := blocks[blockIdx]? | return none
+    let some Q := Qs[blockIdx]? | return none
     let some sigmaSquares :=
       LDL.reconstruct block.size Q (basisAsPolys block.basis)
       | return none
@@ -445,6 +455,6 @@ def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
   match goal with
   | .closed p   => runFeasibilitySearch p gs goal
   | .infeasible => runFeasibilitySearch (-1) gs goal
-  | .strict ..  => panic! "runSearch: strict goals must use runStrictSearch"
+  | .strict ..  => return none
 
 end SOS.Search

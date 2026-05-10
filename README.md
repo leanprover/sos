@@ -111,7 +111,7 @@ verification of the search/round/reconstruct/verify pipeline.
 
 ## Architecture
 
-The tactic runs four stages on a `by sos` goal:
+The tactic runs three stages on a `by sos` goal:
 
 1. `SOS.Reify.parseGoalAtomic` walks the goal expression, collecting
    atomic ℝ-typed subterms into an array and producing untyped
@@ -120,14 +120,12 @@ The tactic runs four stages on a `by sos` goal:
 2. `SOS.Search.runSearch` builds the Putinar-form SDP, calls CSDP,
    rounds the float Gram matrix to rationals, runs LDLᵀ, and
    reconstructs squares — yielding a validated `SOS.Certificate n`.
-3. `SOS.Tactic.closeClosedSosA` / `closeStrictSosA` /
-   `closeInfeasibleSosA` consumes the certificate and discharges the
+3. `SOS.Tactic.closeSos` consumes the certificate and discharges the
    real-arithmetic goal via the matching soundness lemma in
    `SOS.Verifier`.
 
 | Module | What it provides |
 |---|---|
-| `SOS.Atoms` | Atom-table type for the reifier. |
 | `SOS.Raw` | `Poly.Raw` and typed `Poly n` ASTs + reflection theorem. |
 | `SOS.Certificate` | `Goal n`, `SOSDecomp`, `Certificate n`, `checks` predicate. |
 | `SOS.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound`, plus `aeval_*` and `evalReal_eq_aeval` bridge lemmas. |

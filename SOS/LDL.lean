@@ -25,6 +25,11 @@ We store entries `Q[i,j]` for `0 ≤ i ≤ j < n` at position
 @[inline] def upperIdx (n : Nat) (i j : Nat) : Nat :=
   i * n - i * (i + 1) / 2 + j
 
+/-- Number of entries in the upper-triangle storage for an `n × n`
+symmetric matrix. -/
+@[inline] def upperSize (n : Nat) : Nat :=
+  n * (n + 1) / 2
+
 /-- Read entry `(i, j)` from a symmetric matrix stored as upper-triangle.
 The caller may pass `i > j`; we transpose. -/
 @[inline] def readSym (n : Nat) (Q : Array ℚ) (i j : Nat) : ℚ :=
@@ -55,6 +60,7 @@ Gram of `(x + y)²`). When `D[j] = 0` we set `L[i, j] := 0` for
 `i > j`; `LDL.reconstruct` and `transposeMulBasis` already drop
 zero-`D` and zero-`L` contributions. -/
 def decompose (n : Nat) (Q : Array ℚ) : Option LDLT := Id.run do
+  if Q.size ≠ upperSize n then return none
   let mut L : Array ℚ := Array.replicate (n * n) 0
   let mut D : Array ℚ := Array.replicate n 0
   for j in [0:n] do
@@ -145,32 +151,35 @@ def fourSquaresRat (r : ℚ) : Option (List ℚ) := Id.run do
 `Σ_k L[k,i] · z[k]`. -/
 def transposeMulBasis {nVar : Nat} (ldl : LDLT)
     (basis : Array (CMvPolynomial nVar ℚ)) :
-    Array (CMvPolynomial nVar ℚ) := Id.run do
+    Option (Array (CMvPolynomial nVar ℚ)) := Id.run do
   let n := ldl.n
+  if basis.size ≠ n then return none
   let mut w : Array (CMvPolynomial nVar ℚ) := Array.mkEmpty n
   for i in [0:n] do
     let mut acc : CMvPolynomial nVar ℚ := CMvPolynomial.C 0
     for k in [0:n] do
       let lki := ldl.get k i
       if lki ≠ 0 then
-        let bk := basis.getD k (CMvPolynomial.C 0)
+        let some bk := basis[k]? | return none
         acc := acc + CMvPolynomial.C lki * bk
     w := w.push acc
-  return w
+  return some w
 
 /-- Given a PSD rational matrix `Q` and a basis polynomial vector `z`,
 produce a list of polynomial squares whose sum equals `zᵀ Q z`. -/
 def reconstruct {nVar : Nat} (n : Nat) (Q : Array ℚ)
     (basis : Array (CMvPolynomial nVar ℚ)) :
     Option (List (CMvPolynomial nVar ℚ)) := Id.run do
+  if Q.size ≠ upperSize n then return none
+  if basis.size ≠ n then return none
   match decompose n Q with
   | none => return none
   | some ldl =>
-    let w := transposeMulBasis ldl basis
+    let some w := transposeMulBasis ldl basis | return none
     let mut squares : Array (CMvPolynomial nVar ℚ) := #[]
     for i in [0:n] do
       let Di := ldl.D[i]!
-      let wi : CMvPolynomial nVar ℚ := w[i]?.getD (CMvPolynomial.C 0)
+      let some wi := w[i]? | return none
       match fourSquaresRat Di with
       | none => return none
       | some coeffs =>

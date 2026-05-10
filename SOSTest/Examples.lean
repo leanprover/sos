@@ -6,6 +6,28 @@ import SOS
 
 open SOS CPoly
 
+/-! ### Pure invariant checks for search/round/reconstruct helpers -/
+
+#guard (SOS.Search.monomialsUpTo 2 2).size = 6
+#guard
+  match (SOS.Search.monomialsUpTo 2 2)[1]? with
+  | some m =>
+    let a := CMvMonomial.degreeOf m ⟨0, by decide⟩
+    let b := CMvMonomial.degreeOf m ⟨1, by decide⟩
+    a = 1 ∧ b = 0
+  | none => False
+
+#guard
+  match SOS.Search.decodeSdpBlock (1 : ℚ) 2 FloatArray.empty with
+  | none => true
+  | some _ => false
+
+#guard
+  match SOS.LDL.reconstruct 2 (#[] : Array ℚ)
+      (#[] : Array (CMvPolynomial 1 ℚ)) with
+  | none => true
+  | some _ => false
+
 -- 1. closed positivity, 1 var, deg 2
 example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
 

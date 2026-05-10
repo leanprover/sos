@@ -236,6 +236,24 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       acc := acc.push aProof
   return (acc.toList, polys.toList)
 
+/-- Closed and strict goals carry a conclusion polynomial plus the
+original user expression it must bridge back to. -/
+private structure ParsedConclusionData (n : Nat) where
+  tree : SOS.Poly n
+  cmv  : Expr
+  orig : Expr
+
+/-- Extract and cast the conclusion polynomial for closed/strict modes. -/
+private def parsedConclusionData (tag : String)
+    (parsed : SOS.Reify.ParsedGoal) (n : Nat) :
+    TacticM (ParsedConclusionData n) := do
+  let some concl := parsed.concl |
+    throwError "{tag}: missing concl"
+  let some pTree := castRawToPoly concl.raw n |
+    throwError "{tag}: conclusion poly's maxAtomBound exceeds n = {n}"
+  let pCMv ← toCMvExpr n pTree
+  return { tree := pTree, cmv := pCMv, orig := concl.orig }
+
 /-- The shape-specific data the unified close needs: which `Goal`
 constructor to invoke, which soundness lemma, and (for closed/strict)
 how to bridge the resulting `0 ≤ aeval …` / `0 < aeval …` proof back
@@ -260,21 +278,16 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
   let gsListE ← gsCMvListExpr n gPolys
   let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
   -- Closed and strict need the conclusion polynomial; infeasible doesn't.
-  let pData? : Option (SOS.Poly n × Expr × Expr) ← do
+  let pData? : Option (ParsedConclusionData n) ← do
     match mode with
     | .infeasible => pure none
     | .closed | .strict .. =>
-      let some concl := parsed.concl |
-        throwError "sos: missing concl"
-      let some pTree := castRawToPoly concl.raw n |
-        throwError "sos: conclusion poly's maxAtomBound exceeds n = {n}"
-      let pCMv ← toCMvExpr n pTree
-      pure (some (pTree, pCMv, concl.orig))
+      pure (some (← parsedConclusionData "sos" parsed n))
   let goalE ← match mode, pData? with
-    | .closed, some (_, pCMv, _) =>
-      mkAppOptM ``SOS.Goal.closed #[some nE, some pCMv]
-    | .strict εE hεE, some (_, pCMv, _) =>
-      mkAppOptM ``SOS.Goal.strict #[some nE, some pCMv, some εE, some hεE]
+    | .closed, some p =>
+      mkAppOptM ``SOS.Goal.closed #[some nE, some p.cmv]
+    | .strict εE hεE, some p =>
+      mkAppOptM ``SOS.Goal.strict #[some nE, some p.cmv, some εE, some hεE]
     | .infeasible, _ =>
       mkAppOptM ``SOS.Goal.infeasible #[some nE]
     | _, _ => throwError "sos: internal: pData missing for non-infeasible mode"
@@ -282,21 +295,21 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
   let trueE ← mkAppOptM ``Bool.true #[]
   let decProof ← buildDecideTrue (← mkEq checksE trueE)
   match mode, pData? with
-  | .closed, some (pTree, pCMv, origConcl) =>
+  | .closed, some p =>
     let hTarget ← mkAppM ``SOS.sos_sound
-      #[pCMv, gsListE, certE, decProof, φE, hgsProof]
-    let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
-    let pE := Lean.toExpr pTree
+      #[p.cmv, gsListE, certE, decProof, φE, hgsProof]
+    let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
+    let pE := Lean.toExpr p.tree
     let final ← mkAppOptM ``SOS.nonneg_orig_of_aeval
-      #[some nE, some φE, some pE, some origConcl, some eqProof_p, some hTarget]
+      #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
     mv.assign final
-  | .strict εE hεE, some (pTree, pCMv, origConcl) =>
+  | .strict εE hεE, some p =>
     let hTarget ← mkAppM ``SOS.sos_strict_sound
-      #[pCMv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
-    let eqProof_p ← buildAtomicBridgeEq n φE pTree origConcl
-    let pE := Lean.toExpr pTree
+      #[p.cmv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
+    let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
+    let pE := Lean.toExpr p.tree
     let final ← mkAppOptM ``SOS.pos_orig_of_aeval
-      #[some nE, some φE, some pE, some origConcl, some eqProof_p, some hTarget]
+      #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
     mv.assign final
   | .infeasible, _ =>
     let infeasibleProof ← mkAppM ``SOS.sos_infeasible_sound
@@ -315,13 +328,19 @@ syntax (name := sosWitnessTactic)
 /-- Build a `SOS.Certificate n` Expr from a runtime `Certificate n`,
 quoted via `SOS.Poly.decompile` so each square round-trips through
 `ToExpr (SOS.Poly n)`. -/
-private def certExprOfRuntime (n : Nat) (cert : SOS.Certificate n) : MetaM Expr := do
-  let sigma0Decompiled : List (SOS.Poly n) :=
-    cert.sigma0.squares.map SOS.Poly.decompile
-  let sigmasDecompiled : List (List (SOS.Poly n)) :=
-    cert.sigmas.map (·.squares.map SOS.Poly.decompile)
-  let sigma0E := Lean.toExpr sigma0Decompiled
-  let sigmasE := Lean.toExpr sigmasDecompiled
+private structure DecompiledCertificate (n : Nat) where
+  sigma0 : List (SOS.Poly n)
+  sigmas : List (List (SOS.Poly n))
+
+private def decompileCertificate {n : Nat}
+    (cert : SOS.Certificate n) : DecompiledCertificate n :=
+  { sigma0 := cert.sigma0.squares.map SOS.Poly.decompile,
+    sigmas := cert.sigmas.map (·.squares.map SOS.Poly.decompile) }
+
+private def certExprOfDecompiled (n : Nat)
+    (cert : DecompiledCertificate n) : MetaM Expr := do
+  let sigma0E := Lean.toExpr cert.sigma0
+  let sigmasE := Lean.toExpr cert.sigmas
   mkAppOptM ``SOS.Certificate.fromDecompiled
     #[some (Lean.mkNatLit n), some sigma0E, some sigmasE]
 
@@ -410,13 +429,10 @@ private def formatSigmasList {n : Nat}
 
 /-- Render a runtime `SOS.Certificate n` as a Lean source literal
 suitable as the argument to `sos_witness`. -/
-private def formatCertificate {n : Nat} (cert : SOS.Certificate n) : String :=
-  let σ₀_decomp : List (SOS.Poly n) :=
-    cert.sigma0.squares.map SOS.Poly.decompile
-  let σᵢ_decomp : List (List (SOS.Poly n)) :=
-    cert.sigmas.map (fun sd => sd.squares.map SOS.Poly.decompile)
-  s!"\{ sigma0 := \{ squares := {formatSquares σ₀_decomp} }, \
-     sigmas := {formatSigmasList σᵢ_decomp} }"
+private def formatDecompiledCertificate {n : Nat}
+    (cert : DecompiledCertificate n) : String :=
+  s!"\{ sigma0 := \{ squares := {formatSquares cert.sigma0} }, \
+     sigmas := {formatSigmasList cert.sigmas} }"
 
 /-- Format an ε rational as a Lean source literal (`(num : ℚ)` or
 `((num : ℚ) / den)`), suitable for the `with ε := …` clause. -/
@@ -453,17 +469,15 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
   let gsCMv := gPolys.map SOS.Poly.toCMv
   let withFoundCert (cert : SOS.Certificate n) (mode : CloseMode)
       (ε? : Option ℚ) : TacticM Unit := do
+    let decompiled := decompileCertificate cert
     if let some tk := suggest? then
-      emitSosSuggestion tk (formatCertificate cert) ε?
-    let certE ← certExprOfRuntime n cert
+      emitSosSuggestion tk (formatDecompiledCertificate decompiled) ε?
+    let certE ← certExprOfDecompiled n decompiled
     closeSos parsed certE mode
   match parsed.shape with
   | .closed =>
-    let some concl := parsed.concl |
-      throwError "{tag} (closed): missing concl"
-    let some pTree := castRawToPoly concl.raw n |
-      throwError "{tag}: conclusion's maxAtomBound > n = {n}"
-    let goal : SOS.Goal n := .closed pTree.toCMv
+    let p ← parsedConclusionData s!"{tag} (closed)" parsed n
+    let goal : SOS.Goal n := .closed p.tree.toCMv
     match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
     | some cert => withFoundCert cert .closed none
@@ -472,11 +486,8 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
-    let some concl := parsed.concl |
-      throwError "{tag} (strict): missing concl"
-    let some pTree := castRawToPoly concl.raw n |
-      throwError "{tag}: conclusion's maxAtomBound > n = {n}"
-    match (← (SOS.Search.runStrictSearch pTree.toCMv gsCMv : IO _)) with
+    let p ← parsedConclusionData s!"{tag} (strict)" parsed n
+    match (← (SOS.Search.runStrictSearch p.tree.toCMv gsCMv : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε
