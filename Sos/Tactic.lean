@@ -222,6 +222,14 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
         #[some nE, some φE, some gE, some origExpr,
           some eqProof, some hExpr]
       acc := acc ++ [aProof]
+    | .pos =>
+      -- Hypothesis is `0 < origExpr`; promote to `0 ≤ origExpr`.
+      let hLeExpr ← mkAppM ``le_of_lt #[hExpr]
+      let eqProof ← buildAtomicBridgeEq n φE gTree origExpr
+      let aProof ← mkAppOptM ``Sos.aeval_nonneg_of_orig
+        #[some nE, some φE, some gE, some origExpr,
+          some eqProof, some hLeExpr]
+      acc := acc ++ [aProof]
   return (acc, polys)
 
 /-- Closed-positivity close. -/

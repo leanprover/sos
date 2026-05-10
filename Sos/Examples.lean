@@ -60,6 +60,10 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 example (a b c d : ℝ) :
     0 ≤ (a^2 + b^2) * (c^2 + d^2) - (a*c + b*d)^2 := by sos
 
+-- 18b. Strict-inequality constraint hypothesis. Promoted to `0 ≤`
+-- in the elaborator via `le_of_lt`.
+example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
+
 -- 18. Motzkin fall-through (NOT SOS)
 example : True := by
   fail_if_success
