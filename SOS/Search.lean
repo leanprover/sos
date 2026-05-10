@@ -44,40 +44,43 @@ variable {n : Nat}
 
 /-! ### Monomial-basis enumeration -/
 
-/-- All monomials in `n` variables of total degree ≤ `d`, in deterministic
-order. Brute-force enumeration via a counter array. -/
-def monomialsUpTo (n : Nat) (d : Nat) : Array (CMvMonomial n) :=
-  Id.run do
-    let mut acc : Array (CMvMonomial n) := #[]
-    let total : Nat := d + 1
-    let mut counters : Array Nat := Array.replicate n 0
-    let mut done := false
-    while not done do
-      let sum := counters.foldl (· + ·) 0
-      if sum ≤ d then
-        if h : counters.size = n then
-          acc := acc.push ⟨counters, h⟩
-      let mut i : Nat := 0
-      let mut carry := true
-      while carry && i < n do
-        let cur := counters[i]!
-        if cur + 1 < total then
-          counters := counters.set! i (cur + 1)
-          carry := false
-        else
-          counters := counters.set! i 0
-          i := i + 1
-      if carry then done := true
-    return acc
+/-- Default monomial: `Vector ℕ n` of all zeros. -/
+@[inline] def zeroMono (n : Nat) : CMvMonomial n :=
+  ⟨Array.replicate n 0, by simp⟩
+
+instance : Inhabited (CMvMonomial n) := ⟨zeroMono n⟩
+
+/-- Auxiliary: enumerate length-`k` weak compositions (entries ≥ 0,
+sum ≤ `budget`) appended to `acc.reverse`, pushed into `results`.
+
+Iterates the *current* dimension as the outermost loop, which means
+the position pushed earliest into `acc` becomes the outermost (slowest-
+varying) coordinate after the final reverse — i.e. the result list is
+ordered with the first coordinate varying fastest, matching the
+deterministic order callers depended on. -/
+private partial def weakCompositionsAux :
+    Nat → Nat → Array Nat → Array (Array Nat) → Array (Array Nat)
+  | 0, _, acc, results => results.push acc.reverse
+  | k+1, budget, acc, results => Id.run do
+    let mut results := results
+    for e in [0:budget+1] do
+      results := weakCompositionsAux k (budget - e) (acc.push e) results
+    return results
+
+/-- All monomials in `n` variables of total degree ≤ `d`, in
+deterministic order (lex with first coordinate varying fastest).
+
+Cardinality is `C(n+d, d)` — recursion enumerates only valid
+compositions, in contrast to the previous `(d+1)^n`-then-filter
+approach that exploded with moderate variable counts. -/
+def monomialsUpTo (n d : Nat) : Array (CMvMonomial n) :=
+  (weakCompositionsAux n d #[] #[]).map fun arr =>
+    if h : arr.size = n then ⟨arr, h⟩ else default
 
 /-! ### Multiplier basis sizing -/
 
 /-- Half-ceiling: `⌈d/2⌉`. -/
 @[inline] def halfCeil (d : Nat) : Nat := (d + 1) / 2
-
-/-- Default monomial: `Vector ℕ n` of all zeros. -/
-@[inline] def zeroMono (n : Nat) : CMvMonomial n :=
-  ⟨Array.replicate n 0, by simp⟩
 
 /-- The basis-degree bound for σᵢ given target degree and gᵢ degree. -/
 @[inline] def multiplierBasisDeg (targetDeg : Nat) (gDeg : Nat) : Nat :=
@@ -138,8 +141,6 @@ def buildBlocks (target : CMvPolynomial n ℚ)
   Float.ofInt q.num / Float.ofInt q.den
 
 /-! ### Polynomial product accessors -/
-
-instance : Inhabited (CMvMonomial n) := ⟨zeroMono n⟩
 
 /-- For block `b`, compute the polynomial `z_b[j] · z_b[k] · g_b`. -/
 def blockProduct (block : BlockSpec n) (j k : Nat) : CMvPolynomial n ℚ :=
