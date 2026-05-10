@@ -175,32 +175,35 @@ Each speculative intro is wrapped in `Tactic.saveState` /
 leave the local context polluted with introduced binders.
 -/
 
+/-- One reified constraint hypothesis: the untyped polynomial AST,
+the original ℝ-valued side (the `b` in `0 ≤ b`, the `a` in `a ≤ 0`,
+the `b` in `0 < b`), the kind, and the hypothesis FVar. -/
+structure ConstraintInfo where
+  raw  : SOS.Poly.Raw
+  orig : Lean.Expr
+  kind : ConstraintKind
+  fvar : FVarId
+
+/-- Reified conclusion: untyped polynomial AST plus the original
+ℝ-valued side of the user's `0 ≤ p` / `0 < p` goal. Bundled together
+because they're both present iff the conclusion isn't `False`. -/
+structure ParsedConcl where
+  raw  : SOS.Poly.Raw
+  orig : Lean.Expr
+
 /-- Output of `parseGoalAtomic`. The reified polynomials are kept as
 untyped `SOS.Poly.Raw`; the elaborator casts them to `SOS.Poly n` at
 `n = atoms.size` via `Raw.cast`. -/
 structure ParsedGoal where
   /-- Atom Exprs collected from the conclusion and constraints. -/
-  atoms    : Array Expr
+  atoms       : Array Expr
   /-- Coarse shape of the conclusion. -/
-  shape    : ShapeKind
+  shape       : ShapeKind
   /-- Reified conclusion. `none` iff `shape = .infeasible`. -/
-  rawConcl : Option SOS.Poly.Raw
-  /-- Original ℝ-valued conclusion expression. The polynomial side
-  of `0 ≤ origConcl`, `0 < origConcl`, etc. `none` iff `shape =
-  .infeasible`. -/
-  origConcl : Option Lean.Expr
-  /-- Reified constraint polynomials. Indices align with `gsKinds`,
-  `hFVars`, and `origGs`. -/
-  rawGs    : List SOS.Poly.Raw
-  /-- Original ℝ-valued constraint expressions, paired with `rawGs`.
-  For `gsKinds[i] = .nonpos`, this is the polynomial side of the
-  hypothesis `origGs[i] ≤ 0`. -/
-  origGs   : List Lean.Expr
-  /-- Constraint kinds (.nonneg or .nonpos). -/
-  gsKinds  : List ConstraintKind
-  /-- FVarIds of constraint hypotheses (from intro or from the local
-  context). Aligned with `rawGs`/`origGs`/`gsKinds`. -/
-  hFVars   : Array FVarId
+  concl       : Option ParsedConcl
+  /-- Reified constraint hypotheses (from intro or from the local
+  context). -/
+  constraints : Array ConstraintInfo
 
 /-! Atomic parser entry. Steps through the main goal:
 
@@ -221,20 +224,23 @@ structure ParsedGoal where
 Each speculative intro is wrapped in `Tactic.saveState`; a deeper
 reify failure rolls the intros back. -/
 
+/-- Run `reifyRaw e` against `atoms`, returning `none` if it throws.
+Hoisted out of `recogniseConstraint` and `parseGoalAtomicAux` (where
+it used to be duplicated). -/
+private def tryReify (e : Expr) (atoms : Array Expr) :
+    Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
+  try
+    let (raw, atoms') ← (reifyRaw e).goWith atoms
+    return some (raw, atoms')
+  catch _ => return none
+
 /-- Try to recognise a hypothesis Expr as a constraint of one of the
 supported shapes (`0 ≤ b`, `a ≤ 0`, `0 < b`). Returns the
 ConstraintKind, the reified polynomial, the original ℝ-typed Expr,
-and the updated atom array. Used by both the iterative parser and
-`mergeLocalCtxConstraints`. -/
+and the updated atom array. -/
 def recogniseConstraint (h : Expr) (atoms : Array Expr) :
     Tactic.TacticM (Option
       (ConstraintKind × SOS.Poly.Raw × Lean.Expr × Array Expr)) := do
-  let tryReify (e : Expr) (atoms : Array Expr) :
-      Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
-    try
-      let (raw, atoms') ← (reifyRaw e).goWith atoms
-      return some (raw, atoms')
-    catch _ => return none
   let h ← whnfR h
   match_expr h with
   | LE.le _ _ a b =>
@@ -255,14 +261,12 @@ def recogniseConstraint (h : Expr) (atoms : Array Expr) :
   | _ => return none
 
 partial def parseGoalAtomicAux
-    (atoms : Array Expr) (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
-    (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
+    (atoms : Array Expr) (constraints : Array ConstraintInfo) :
     Tactic.TacticM (Option ParsedGoal) := Tactic.withMainContext do
   let mv ← Tactic.getMainGoal
   let goalType ← mv.getType >>= instantiateMVars
   -- Step 1: try a recognised-conclusion match first.
-  if let some out ←
-      tryReifyConclusion goalType atoms rawGs origGs gsKinds hFVars then
+  if let some out ← tryReifyConclusion goalType atoms constraints then
     return some out
   -- Step 2 / 3: descend into ∀ or →.
   let goalType' ← whnfR goalType
@@ -271,17 +275,17 @@ partial def parseGoalAtomicAux
     -- Reduce by hand to `p → False`, then re-enter the parser.
     let unfolded ← Meta.whnf goalType'
     if let .forallE _ _ _ _ := unfolded then
-      if let some out ← tryConstraintIntro unfolded atoms rawGs origGs gsKinds hFVars then
+      if let some out ← tryConstraintIntro unfolded atoms constraints then
         return some out
     return none
   if let .forallE _ binderType body _ := goalType' then
     if !body.hasLooseBVars then
-      return ← tryConstraintIntro goalType' atoms rawGs origGs gsKinds hFVars
+      return ← tryConstraintIntro goalType' atoms constraints
     if (← Meta.isDefEq binderType (Lean.mkConst ``Real)) then
       let st ← Tactic.saveState
       let (_, mv') ← mv.intro1
       Tactic.replaceMainGoal [mv']
-      match ← parseGoalAtomicAux atoms rawGs origGs gsKinds hFVars with
+      match ← parseGoalAtomicAux atoms constraints with
       | some out => return some out
       | none => st.restore; return none
   return none
@@ -289,8 +293,7 @@ where
   /-- Try to match the goal against a recognised conclusion shape.
   Reifies via `reifyRaw` against the running `atoms`. -/
   tryReifyConclusion (goalType : Expr) (atoms : Array Expr)
-      (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
-      (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
+      (constraints : Array ConstraintInfo) :
       Tactic.TacticM (Option ParsedGoal) := do
     let goalType ← whnfR goalType
     match_expr goalType with
@@ -299,25 +302,23 @@ where
       unless r = 0 do return none
       let some (raw, atoms') ← tryReify b atoms | return none
       return some
-        { atoms := atoms', shape := .closed, rawConcl := some raw,
-          origConcl := some b, rawGs, origGs, gsKinds, hFVars }
+        { atoms := atoms', shape := .closed,
+          concl := some { raw, orig := b }, constraints }
     | LT.lt _ _ a b =>
       let some r ← ratLit? a | return none
       unless r = 0 do return none
       let some (raw, atoms') ← tryReify b atoms | return none
       return some
-        { atoms := atoms', shape := .strict, rawConcl := some raw,
-          origConcl := some b, rawGs, origGs, gsKinds, hFVars }
+        { atoms := atoms', shape := .strict,
+          concl := some { raw, orig := b }, constraints }
     | False =>
       return some
-        { atoms, shape := .infeasible, rawConcl := none, origConcl := none,
-          rawGs, origGs, gsKinds, hFVars }
+        { atoms, shape := .infeasible, concl := none, constraints }
     | _ => return none
   /-- Try to recognise `g → body` and recurse. The hypothesis must
   reify cleanly under the current atom set; otherwise we restore. -/
   tryConstraintIntro (goalType : Expr) (atoms : Array Expr)
-      (rawGs : List SOS.Poly.Raw) (origGs : List Lean.Expr)
-      (gsKinds : List ConstraintKind) (hFVars : Array FVarId) :
+      (constraints : Array ConstraintInfo) :
       Tactic.TacticM (Option ParsedGoal) := do
     let .forallE _ hypType body _ := goalType | return none
     unless !body.hasLooseBVars do return none
@@ -327,43 +328,32 @@ where
     let mv ← Tactic.getMainGoal
     let (hFV, mv') ← mv.intro `h
     Tactic.replaceMainGoal [mv']
-    match ← parseGoalAtomicAux atoms' (rawGs ++ [rawG]) (origGs ++ [origG])
-        (gsKinds ++ [kind]) (hFVars.push hFV) with
+    let info : ConstraintInfo :=
+      { raw := rawG, orig := origG, kind, fvar := hFV }
+    match ← parseGoalAtomicAux atoms' (constraints.push info) with
     | some out => return some out
     | none => st.restore; return none
-  /-- Run `reifyRaw` against the current atom array, returning none
-  if reify throws. -/
-  tryReify (e : Expr) (atoms : Array Expr) :
-      Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
-    try
-      let (raw, atoms') ← (reifyRaw e).goWith atoms
-      return some (raw, atoms')
-    catch _ =>
-      return none
 
 /-- Scan the local context for hypothesis FVars matching a constraint
-shape, and merge them into `pg`. Skips FVars already in `pg.hFVars`
-(intro'd by the iterative parser) and FVars whose type isn't `Prop`. -/
+shape, and merge them into `pg`. Skips FVars already recorded in
+`pg.constraints` (intro'd by the iterative parser) and FVars whose
+type isn't `Prop`. -/
 def mergeLocalCtxConstraints (pg : ParsedGoal) :
     Tactic.TacticM ParsedGoal := Tactic.withMainContext do
   let mut atoms := pg.atoms
-  let mut rawGs := pg.rawGs
-  let mut origGs := pg.origGs
-  let mut gsKinds := pg.gsKinds
-  let mut hFVars := pg.hFVars
+  let mut constraints := pg.constraints
+  let known : Std.HashSet FVarId := constraints.foldl (·.insert ·.fvar) {}
   let lctx ← Lean.getLCtx
   for ldecl in lctx do
     if ldecl.isImplementationDetail then continue
-    if hFVars.contains ldecl.fvarId then continue
+    if known.contains ldecl.fvarId then continue
     let ty ← Lean.Meta.inferType ldecl.type
     unless ty.isProp do continue
     if let some (kind, rawG, origG, atoms') ← recogniseConstraint ldecl.type atoms then
       atoms := atoms'
-      rawGs := rawGs ++ [rawG]
-      origGs := origGs ++ [origG]
-      gsKinds := gsKinds ++ [kind]
-      hFVars := hFVars.push ldecl.fvarId
-  return { pg with atoms, rawGs, origGs, gsKinds, hFVars }
+      constraints := constraints.push
+        { raw := rawG, orig := origG, kind, fvar := ldecl.fvarId }
+  return { pg with atoms, constraints }
 
 /-- Top-level entry. Intros all parseable ∀-binders and constraint
 hypotheses, scans the local context for additional constraint
@@ -371,7 +361,7 @@ hypotheses, then returns the parsed goal. Returns `none` if the
 conclusion isn't in the supported fragment. -/
 def parseGoalAtomic : Tactic.TacticM (Option ParsedGoal) := do
   let st ← Tactic.saveState
-  match ← parseGoalAtomicAux #[] [] [] [] #[] with
+  match ← parseGoalAtomicAux #[] #[] with
   | some out => return some (← mergeLocalCtxConstraints out)
   | none => st.restore; return none
 
