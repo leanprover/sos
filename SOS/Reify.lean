@@ -27,6 +27,11 @@ namespace SOS.Reify
 
 open Lean Meta Elab CPoly
 
+/-- Trace class for the reifier. Enable with
+`set_option trace.sos.reify true` to see why a hypothesis or
+conclusion failed to reify. The success path is silent. -/
+initialize Lean.registerTraceClass `sos.reify
+
 /-! ### Goal classification -/
 
 /-- The three goal shapes the reifier recognises. -/
@@ -226,13 +231,20 @@ reify failure rolls the intros back. -/
 
 /-- Run `reifyRaw e` against `atoms`, returning `none` if it throws.
 Hoisted out of `recogniseConstraint` and `parseGoalAtomicAux` (where
-it used to be duplicated). -/
+it used to be duplicated).
+
+Failure is intentionally swallowed so that an unrecognised hypothesis
+just falls through (it might still be a valid local-context fact;
+the parser is supposed to be best-effort). The exception is logged
+under `trace.sos.reify` for when "best effort" hides a real bug. -/
 private def tryReify (e : Expr) (atoms : Array Expr) :
     Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
   try
     let (raw, atoms') ← (reifyRaw e).goWith atoms
     return some (raw, atoms')
-  catch _ => return none
+  catch ex =>
+    trace[sos.reify] "tryReify({e}) failed: {ex.toMessageData}"
+    return none
 
 /-- Try to recognise a hypothesis Expr as a constraint of one of the
 supported shapes (`0 ≤ b`, `a ≤ 0`, `0 < b`). Returns the
