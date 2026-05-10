@@ -194,8 +194,8 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
     (gsKinds : List SOS.Reify.ConstraintKind) (hFVars : Array FVarId) :
     TacticM (List Expr × List (SOS.Poly n)) := do
   let nE := Lean.mkNatLit n
-  let mut acc : List Expr := []
-  let mut polys : List (SOS.Poly n) := []
+  let mut acc : Array Expr := Array.mkEmpty rawGs.length
+  let mut polys : Array (SOS.Poly n) := Array.mkEmpty rawGs.length
   for i in [:rawGs.length] do
     let raw := rawGs[i]!
     let some gTree := castRawToPoly raw n |
@@ -205,14 +205,14 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
     let hFVar := hFVars[i]!
     let hExpr := Lean.mkFVar hFVar
     let gE := Lean.toExpr gTree
-    polys := polys ++ [gTree]
+    polys := polys.push gTree
     match kind with
     | .nonneg =>
       let eqProof ← buildAtomicBridgeEq n φE gTree origExpr
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
         #[some nE, some φE, some gE, some origExpr,
           some eqProof, some hExpr]
-      acc := acc ++ [aProof]
+      acc := acc.push aProof
     | .nonpos =>
       -- gTree's evalReal yields `-origExpr` because the reifier
       -- already wrapped the orig poly in `Raw.neg`.
@@ -221,7 +221,7 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig_neg
         #[some nE, some φE, some gE, some origExpr,
           some eqProof, some hExpr]
-      acc := acc ++ [aProof]
+      acc := acc.push aProof
     | .pos =>
       -- Hypothesis is `0 < origExpr`; promote to `0 ≤ origExpr`.
       let hLeExpr ← mkAppM ``le_of_lt #[hExpr]
@@ -229,8 +229,8 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
         #[some nE, some φE, some gE, some origExpr,
           some eqProof, some hLeExpr]
-      acc := acc ++ [aProof]
-  return (acc, polys)
+      acc := acc.push aProof
+  return (acc.toList, polys.toList)
 
 /-- Closed-positivity close. -/
 def closeClosedSosA (parsed : SOS.Reify.ParsedGoal)
@@ -341,12 +341,12 @@ private def certExprOfRuntime (n : Nat) (cert : SOS.Certificate n) : MetaM Expr 
 /-- Helper: cast rawGs to typed Poly n. -/
 private def castGs (rawGs : List SOS.Poly.Raw) (n : Nat) :
     TacticM (List (SOS.Poly n)) := do
-  let mut acc : List (SOS.Poly n) := []
+  let mut acc : Array (SOS.Poly n) := Array.mkEmpty rawGs.length
   for raw in rawGs do
     let some gT := castRawToPoly raw n |
       throwError "sos: constraint poly's maxAtomBound > n = {n}"
-    acc := acc ++ [gT]
-  return acc
+    acc := acc.push gT
+  return acc.toList
 
 elab_rules : tactic
   | `(tactic| sos) => do
