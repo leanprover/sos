@@ -437,25 +437,54 @@ recession directions for CSDP) means the search doesn't yet converge
 on them. Marked `FIXME`: provide via `sos_witness` for now, revisit
 when the cofactor SDP gets a regularisation pass. -/
 
--- sos.ml:1647 — `x²+y²+z² = 1 → 0 ≤ 3 − (x+y+z)²`. Hand-crafted
--- witness: cofactor `q := −3` (note sign — the reifier records the
--- equality polynomial as `x²+y²+z² − 1`, so `−3 · (x²+y²+z² − 1)
--- + (x−y)² + (y−z)² + (z−x)² = 3 − (x+y+z)²`).
+-- sos.ml:1647 — `x²+y²+z² = 1 → 0 ≤ 3 − (x+y+z)²`. Cofactor `q := −3`
+-- (degree 0, so within the search's basis bound) and SOS residual
+-- `(x−y)² + (y−z)² + (z−x)²`.
 example (x y z : ℝ) (_h : x^2 + y^2 + z^2 = 1) :
-    0 ≤ 3 - (x + y + z)^2 := by
-  sos_witness
-    { sigma0 :=
-        { squares := [CMvPolynomial.X 0 - CMvPolynomial.X 1,
-                      CMvPolynomial.X 1 - CMvPolynomial.X 2,
-                      CMvPolynomial.X 2 - CMvPolynomial.X 0] },
-      sigmas := [],
-      eqCofs := [-CMvPolynomial.C (3 : ℚ)] }
+    0 ≤ 3 - (x + y + z)^2 := by sos
 
 -- Control for sos.ml:1647: same conclusion without the equality must
 -- fail (false at `x := y := z := 2`).
 example : True := by
   fail_if_success
     (have : ∀ x y z : ℝ, 0 ≤ 3 - (x + y + z)^2 := by sos)
+  trivial
+
+-- sos.ml:1650 — `w²+x²+y²+z² = 1 → (w+x+y+z)² ≤ 4`. Four-variable
+-- analogue of 1647. The search should find σ₀ = Σ_{i<j} (vᵢ - vⱼ)²
+-- and q = -4.
+example (w x y z : ℝ) (_h : w^2 + x^2 + y^2 + z^2 = 1) :
+    0 ≤ 4 - (w + x + y + z)^2 := by sos
+
+-- Control for sos.ml:1650: false at `w = x = y = z := 10`.
+example : True := by
+  fail_if_success
+    (have : ∀ w x y z : ℝ, 0 ≤ 4 - (w + x + y + z)^2 := by sos)
+  trivial
+
+-- sos.ml:1629 — discriminant: `a·x²+b·x+c = 0 → 0 ≤ b² − 4ac`.
+-- Identity: `b² − 4ac = (2ax + b)² + (−4a)·(ax² + bx + c)`. The
+-- cofactor `−4a` has degree 1, but the search's current cofactor-basis
+-- bound is `σ₀Deg − deg(p) = 2 − 2 = 0`, so `by sos` only explores
+-- constant cofactors and fails here. Iterative deepening (issue #16)
+-- would let `by sos` find this. Until then we provide the witness:
+-- empirically the parser's atom order is `b, a, c, x` (b is first
+-- because the conclusion `b² − 4ac` is walked left-to-right; b gets
+-- index 0, a index 1, c index 2; x is new from the hypothesis at
+-- index 3).
+example (a b c x : ℝ) (_h : a*x^2 + b*x + c = 0) :
+    0 ≤ b^2 - 4*a*c := by
+  sos_witness
+    { sigma0 :=
+        { squares := [CMvPolynomial.C (2 : ℚ) * CMvPolynomial.X 1
+                        * CMvPolynomial.X 3 + CMvPolynomial.X 0] },
+      sigmas := [],
+      eqCofs := [-(CMvPolynomial.C (4 : ℚ) * CMvPolynomial.X 1)] }
+
+-- Control for sos.ml:1629: false at `a = c := 1, b := 0`.
+example : True := by
+  fail_if_success
+    (have : ∀ a b c : ℝ, 0 ≤ b^2 - 4*a*c := by sos)
   trivial
 
 -- FIXME sos.ml:1714 — `x*y = 1 → 0 ≤ x² + y² − x*y*(x+y)`. The search
