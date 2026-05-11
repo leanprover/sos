@@ -385,6 +385,16 @@ example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by
 -- search should discover `q := 1` automatically.
 example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos
 
+-- E2b. Search-driven, degree-1 cofactor. From `x = 1` conclude
+-- `0 ≤ x² − 1`. The search must discover `q := x + 1`:
+-- `x² − 1 = (x + 1)(x − 1)`.
+example (x : ℝ) (_h : x = 1) : 0 ≤ x^2 - 1 := by sos
+
+-- E2c. Strict positivity with an equality. `x² = 0 → 0 < x² + 1`
+-- exercises the `runStrict` equality path: the LP-slack solve and the
+-- feasibility re-solve must both include the cofactor blocks.
+example (x : ℝ) (_h : x^2 = 0) : 0 < x^2 + 1 := by sos
+
 -- E3. Combine an inequality and an equality. From `0 ≤ x − 1` (i.e.
 -- `x ≥ 1`) and `x = 0` derive `False`.
 -- Certificate: `−1 = 0 + 1 · (x − 1) + (−1) · x`.
@@ -401,3 +411,23 @@ info: Try this:
 -/
 #guard_msgs in
 example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos?
+
+/-! #### Harrison `sos.ml` equality-hypothesis tests
+
+These were excluded from the original Harrison port because the
+tactic didn't support equality hypotheses. With this PR they enter
+the supported fragment, but the cofactor LP encoding's numerical
+degeneracy (zero-cost split variables for `x⁺ − x⁻` leave primal
+recession directions for CSDP) means the search doesn't yet converge
+on them. Marked `FIXME`: provide via `sos_witness` for now, revisit
+when the cofactor SDP gets a regularisation pass. -/
+
+-- FIXME sos.ml:1714 — `x*y = 1 → 0 ≤ x² + y² − x*y*(x+y)`.
+-- Cofactor `q := x + y`: residual factors as `(x − y)²`.
+-- example (x y : ℝ) (_h : x*y = 1) :
+--     0 ≤ x^2 + y^2 - x*y*(x + y) := by sos
+
+-- FIXME sos.ml:1647 — `x²+y²+z² = 1 → 0 ≤ 3 − (x+y+z)²`.
+-- Cofactor `q := 3`: residual factors as a sum of `(x−y)²`-style.
+-- example (x y z : ℝ) (_h : x^2 + y^2 + z^2 = 1) :
+--     0 ≤ 3 - (x + y + z)^2 := by sos
