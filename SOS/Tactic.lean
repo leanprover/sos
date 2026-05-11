@@ -384,6 +384,7 @@ private partial def formatPoly {n : Nat} (p : SOS.Poly n)
   --   (const 1) * q        → q
   --   p * (const 1)        → p
   --   p ^ 1                → p
+  -- These arise from `SOS.Poly.decompile`'s fold-from-zero normal form.
   match p with
   | .add (.const r) q =>
     if r = 0 then formatPoly q parenIfComposite

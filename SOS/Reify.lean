@@ -189,9 +189,8 @@ structure ConstraintInfo where
   kind : ConstraintKind
   fvar : FVarId
 
-/-- Reified conclusion: untyped polynomial AST plus the original
-ℝ-valued side of the user's `0 ≤ p` / `0 < p` goal. Bundled together
-because they're both present iff the conclusion isn't `False`. -/
+/-- Reified conclusion: `raw` is the reified polynomial AST; `orig`
+is the original Expr needed by the bridge equation. -/
 structure ParsedConcl where
   raw  : SOS.Poly.Raw
   orig : Lean.Expr
@@ -230,13 +229,14 @@ Each speculative intro is wrapped in `Tactic.saveState`; a deeper
 reify failure rolls the intros back. -/
 
 /-- Run `reifyRaw e` against `atoms`, returning `none` if it throws.
-Hoisted out of `recogniseConstraint` and `parseGoalAtomicAux` (where
-it used to be duplicated).
 
-Failure is intentionally swallowed so that an unrecognised hypothesis
-just falls through (it might still be a valid local-context fact;
-the parser is supposed to be best-effort). The exception is logged
-under `trace.sos.reify` for when "best effort" hides a real bug. -/
+`reifyRaw` itself doesn't throw on unrecognised shapes (those are
+opacified via `addAtom`); the only failures here are `Meta` errors
+(whnfR / isDefEq) that would propagate as elaboration exceptions.
+Swallowing those lets callers fall through gracefully when the
+hypothesis really isn't a polynomial-shaped constraint; the
+exception is logged under `trace.sos.reify` for when "best effort"
+hides a real bug. -/
 private def tryReify (e : Expr) (atoms : Array Expr) :
     Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
   try
