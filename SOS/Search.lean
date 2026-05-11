@@ -8,8 +8,9 @@ rounding of the float Gram-matrix solution, and the top-level
 
 Closed positivity and infeasibility go through the feasibility SDP
 (`runFeasibilitySearch`); strict positivity goes through `runStrict`,
-which adds a slack variable to the SDP (`buildSdpStrict`), reads back
-`λ*` from CSDP, and re-solves `p − ε ≥ 0` for `ε = 2^-k` near `λ*`.
+which adds a slack variable to the SDP via the `.lpSlack` mode of
+`buildSdp`, reads back `λ*` from CSDP, and re-solves `p − ε ≥ 0` for
+`ε = 2^-k` near `λ*`.
 
 **Encoding (Putinar form).** For a target polynomial `t` (= `p` for
 closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
@@ -187,23 +188,50 @@ structure CachedProduct (n : Nat) where
 
 /-! ### CSDP problem construction -/
 
-/-- Build the SDP feasibility problem for `target ≥ 0` over `gs`.
+/-- Which SDP we're building.
 
-`useTraceCost = true` populates the cost matrix `C` with the
-identity on every block, so CSDP maximises `tr(X)`. This is
-Harrison's HOL Light convention (the direction is empirically
-irrelevant — any nonzero objective regularises CSDP's interior-point
-search) and is required to make CSDP converge on near-rank-deficient
-SDPs (closed positivity / strict positivity). For infeasibility
-certificates the trace objective interacts badly with CSDP's
-homogeneous self-dual embedding (CSDP declares "dual infeasible" on
-what is otherwise a feasible problem); pass `useTraceCost = false`
-for that case to keep `C = 0` (pure feasibility). -/
+* `.feasibility (useTraceCost := true)` (default for closed positivity):
+  cost matrix `C` is the identity on every σ-block, so CSDP maximises
+  `tr(X)`. Harrison's HOL Light convention; required to make CSDP
+  converge on near-rank-deficient SDPs.
+* `.feasibility (useTraceCost := false)` (infeasibility certificates):
+  `C = 0`. The trace objective interacts badly with CSDP's homogeneous
+  self-dual embedding on infeasibility (CSDP declares "dual infeasible"
+  on what is otherwise a feasible problem).
+* `.lpSlack` (strict positivity): adds a `1×1` PSD λ-block (so `λ ≥ 0`),
+  attaches `+1·λ` to the constant-monomial equality, and asks CSDP to
+  maximise λ via cost `+1` on the λ-block diagonal. The direction is
+  empirically irrelevant for the trace regularisation in `.feasibility`,
+  but the LP-slack direction must be `max` so `runStrict` can read back
+  `λ*` as the largest admissible slack. -/
+inductive SdpMode where
+  /-- Feasibility encoding `target = σ₀ + Σᵢ σᵢ · gᵢ`. -/
+  | feasibility (useTraceCost : Bool := true)
+  /-- LP-slack encoding for strict positivity: certifies `target − λ ≥ 0`
+  with `λ ≥ 0` as a decision variable and asks CSDP to maximise `λ`. -/
+  | lpSlack
+  deriving Inhabited
+
+/-- Build the SDP encoding `target = σ₀ + Σᵢ σᵢ · gᵢ` for the chosen
+`mode`. Returns the CSDP problem, the σ-block specs (excluding the
+λ block in `.lpSlack` mode), the monomial array indexing CSDP
+constraints, and (for `.lpSlack`) the 0-based index of the λ block in
+`Solution.X`. -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
-    (useTraceCost : Bool := true) :
-    LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) :=
-  let blocks := buildBlocks target gs
-  let blockSizes : Array Int32 := blocks.map fun b => Int32.ofNat b.size
+    (mode : SdpMode := .feasibility) :
+    LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) ×
+      Option Nat :=
+  let σBlocks := buildBlocks target gs
+  let lambdaBlockIdx? : Option Nat :=
+    match mode with
+    | .lpSlack => some σBlocks.size
+    | _        => none
+  let σBlockSizes := σBlocks.map fun b => Int32.ofNat b.size
+  let blockSizes : Array Int32 :=
+    match mode with
+    | .lpSlack => σBlockSizes.push 1
+    | _        => σBlockSizes
+  let constMono := zeroMono n
   -- One pass: cache each blockProduct as its sparse support, accumulate
   -- the monomial union, and build a (monomial → index) lookup. Both
   -- the b-vector pass and the aTriples emission below consume `cached`
@@ -214,16 +242,24 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     Id.run do
       let mut monos : Array (CMvMonomial n) := #[]
       let mut monoIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
-      -- Seed with target's monomials so the b-vector lookup
-      -- `target.coeff monos[i]` is non-trivial for any monomial that
-      -- comes from `target` even if no product introduces it.
+      -- LP-slack always needs the constant-monomial equality (to attach
+      -- the `+1·λ` term to). Seed it first whether or not `target` has
+      -- a constant term. For feasibility, seed with target's monomials
+      -- so the b-vector lookup `target.coeff monos[i]` is non-trivial
+      -- for any monomial coming from `target`, even if no σ-product
+      -- introduces it.
+      match mode with
+      | .lpSlack =>
+        monoIndex := monoIndex.insert constMono 0
+        monos := monos.push constMono
+      | _ => pure ()
       for m in target.monomials do
         if !monoIndex.contains m then
           monoIndex := monoIndex.insert m monos.size
           monos := monos.push m
       let mut cached : Array (CachedProduct n) := #[]
-      for blockIdx in [0:blocks.size] do
-        let block := blocks[blockIdx]!
+      for blockIdx in [0:σBlocks.size] do
+        let block := σBlocks[blockIdx]!
         let bsize := block.size
         for j in [0:bsize] do
           for k in [j:bsize] do
@@ -257,21 +293,21 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
             row := UInt32.ofNat (cp.j + 1)
             col := UInt32.ofNat (cp.k + 1)
             value := ratToFloat c }
+    -- LP-slack: append `+1·λ` on the constant-monomial equality.
+    if let some lambdaBlockIdx := lambdaBlockIdx? then
+      let constMonoIdx := monoIndex[constMono]!
+      acc := acc.push
+        { constraint := UInt32.ofNat (constMonoIdx + 1)
+          block := UInt32.ofNat (lambdaBlockIdx + 1)
+          row := 1, col := 1, value := 1.0 }
     return acc
-  -- Cost matrix: maximise `tr(X) = Σ_b Σ_j M_b[j,j]`. CSDP maximises
-  -- `tr(C·X)`, so populating `c` with `(b, j, j, 1.0)` for every block
-  -- diagonal position expresses `max tr(X)`. Pure feasibility (`c = []`)
-  -- leaves CSDP's primal objective at 0 and gives no preferred direction
-  -- when the feasible set is a single boundary point; Harrison's HOL
-  -- Light SOS reports that an arbitrary objective improves rounding
-  -- behaviour and may change CSDP's stopping criterion. The direction
-  -- (max vs min) is empirically irrelevant for that regularisation
-  -- effect.
+  -- Cost matrix: depends on mode. CSDP maximises `tr(C·X)`. See `SdpMode`.
   let cTriples : Array LeanCsdp.Triple :=
-    if useTraceCost then Id.run do
+    match mode, lambdaBlockIdx? with
+    | .feasibility true, _ => Id.run do
       let mut acc : Array LeanCsdp.Triple := #[]
-      for blockIdx in [0:blocks.size] do
-        let block := blocks[blockIdx]!
+      for blockIdx in [0:σBlocks.size] do
+        let block := σBlocks[blockIdx]!
         for j in [0:block.size] do
           acc := acc.push
             { block := UInt32.ofNat (blockIdx + 1)
@@ -279,98 +315,18 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
               col   := UInt32.ofNat (j + 1)
               value := 1.0 }
       return acc
-    else #[]
+    | .feasibility false, _ => #[]
+    | .lpSlack, some lambdaBlockIdx => #[
+      { block := UInt32.ofNat (lambdaBlockIdx + 1), row := 1, col := 1,
+        value := 1.0 }]
+    | .lpSlack, none => #[]  -- unreachable; lambdaBlockIdx? is `some` in .lpSlack
   let problem : LeanCsdp.Problem :=
     { blockSizes := blockSizes
       b := b
       c := cTriples
       a := aTriples
       constantOffset := 0.0 }
-  (problem, blocks, monos)
-
-/-! ### LP-slack strict-positivity SDP
-
-For `0 < p` over constraints `gᵢ ≥ 0`, encode `λ` as a decision variable
-in a 1×1 PSD block (so `λ ≥ 0`) and ask CSDP to maximise it. The
-constant-monomial equality picks up a `+1 · λ` term:
-
-* For `m = 1`: `coef₁(p) = (σ-stuff at constant) + λ`,
-  i.e. `σ-stuff[const] = coef₁(p) − λ`.
-* For `m ≠ 1`: unchanged from `buildSdp`.
-
-CSDP maximises `tr(C·X)`; cost = `+1.0` on the λ-block diagonal.
-Returns the SDP problem, the σ-block specs (without the λ block), the
-monomial array, and the 0-based index of the λ block in `Solution.X`. -/
-def buildSdpStrict (p : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
-    LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) × Nat :=
-  let σBlocks := buildBlocks p gs
-  let lambdaBlockIdx : Nat := σBlocks.size
-  let blockSizes : Array Int32 :=
-    (σBlocks.map fun b => Int32.ofNat b.size).push 1
-  let constMono := zeroMono n
-  let (cached, monos, monoIndex) :
-      Array (CachedProduct n) × Array (CMvMonomial n) ×
-        Std.TreeMap (CMvMonomial n) Nat compare :=
-    Id.run do
-      let mut monos : Array (CMvMonomial n) := #[]
-      let mut monoIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
-      -- LP-slack always needs the constant-monomial equality (to attach
-      -- the −λ term to). Seed it first whether or not `p` has a constant
-      -- term.
-      monoIndex := monoIndex.insert constMono 0
-      monos := monos.push constMono
-      for m in p.monomials do
-        if !monoIndex.contains m then
-          monoIndex := monoIndex.insert m monos.size
-          monos := monos.push m
-      let mut cached : Array (CachedProduct n) := #[]
-      for blockIdx in [0:σBlocks.size] do
-        let block := σBlocks[blockIdx]!
-        let bsize := block.size
-        for j in [0:bsize] do
-          for k in [j:bsize] do
-            let prod := blockProduct block j k
-            let mut support : Array (CMvMonomial n × ℚ) := #[]
-            for m in prod.monomials do
-              let c := prod.coeff m
-              if c ≠ 0 then
-                support := support.push (m, c)
-                if !monoIndex.contains m then
-                  monoIndex := monoIndex.insert m monos.size
-                  monos := monos.push m
-            cached := cached.push { blockIdx, j, k, support }
-      return (cached, monos, monoIndex)
-  let b : Array Float := monos.map fun m => ratToFloat (p.coeff m)
-  let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
-    let mut acc : Array LeanCsdp.ConstraintTriple := #[]
-    for cp in cached do
-      for (m, c) in cp.support do
-        let monoIdx := monoIndex[m]!
-        acc := acc.push
-          { constraint := UInt32.ofNat (monoIdx + 1)
-            block := UInt32.ofNat (cp.blockIdx + 1)
-            row := UInt32.ofNat (cp.j + 1)
-            col := UInt32.ofNat (cp.k + 1)
-            value := ratToFloat c }
-    -- LP-slack: append `+1·λ` on the constant-monomial equality.
-    let constMonoIdx := monoIndex[constMono]!
-    acc := acc.push
-      { constraint := UInt32.ofNat (constMonoIdx + 1)
-        block := UInt32.ofNat (lambdaBlockIdx + 1)
-        row := 1, col := 1, value := 1.0 }
-    return acc
-  -- Cost: `+1.0` on the λ-block diagonal. CSDP maximises `tr(C·X)`,
-  -- so this maximises λ.
-  let cTriples : Array LeanCsdp.Triple := #[
-    { block := UInt32.ofNat (lambdaBlockIdx + 1), row := 1, col := 1,
-      value := 1.0 }]
-  let problem : LeanCsdp.Problem :=
-    { blockSizes := blockSizes
-      b := b
-      c := cTriples
-      a := aTriples
-      constantOffset := 0.0 }
-  (problem, σBlocks, monos, lambdaBlockIdx)
+  (problem, σBlocks, monos, lambdaBlockIdx?)
 
 /-! ### Denominator schedule for rational rounding -/
 
@@ -474,7 +430,7 @@ validates. -/
 private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (goal : Goal n)
     (useTraceCost : Bool) : IO (Option (Certificate n)) := do
-  let (problem, blocks, _monos) := buildSdp target gs useTraceCost
+  let (problem, blocks, _monos, _) := buildSdp target gs (.feasibility useTraceCost)
   if problem.b.size = 0 then
     if target = 0 then
       return some { sigma0 := { squares := [] },
@@ -528,8 +484,8 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
 /-! ### Strict positivity via LP-slack maximisation
 
 For `0 < p` over constraints `gᵢ ≥ 0`, encode `λ` as a decision
-variable in `buildSdpStrict` and let CSDP discover the largest `λ*`
-for which `p − λ` admits a Putinar certificate at the chosen
+variable via `buildSdp _ _ .lpSlack` and let CSDP discover the largest
+`λ*` for which `p − λ` admits a Putinar certificate at the chosen
 relaxation level. Then re-solve `p − ε ≥ 0` with a rational
 `ε ∈ (0, λ*)` to obtain a verifiable certificate. The two-stage
 design avoids trying to round the σ-block Gram matrices from the LP
@@ -565,7 +521,8 @@ window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) :
     IO (Option (StrictResult n)) := do
-  let (problem, _σBlocks, _monos, lambdaBlockIdx) := buildSdpStrict p gs
+  let (problem, _σBlocks, _monos, lambdaBlockIdx?) := buildSdp p gs .lpSlack
+  let some lambdaBlockIdx := lambdaBlockIdx? | return none
   let sol := LeanCsdp.solve problem
   if sol.ret ∉ [0, 3] then return none
   let lambdaStar := readLambda sol lambdaBlockIdx
