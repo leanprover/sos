@@ -118,7 +118,7 @@ instance : Inhabited (BlockSpec n) where
   default := { basis := #[], multiplier := CMvPolynomial.C 0 }
 
 namespace BlockSpec
-def size (b : BlockSpec n) : Nat := b.basis.size
+@[inline] def size (b : BlockSpec n) : Nat := b.basis.size
 end BlockSpec
 
 /-- Build the per-block specs from the target polynomial and constraint

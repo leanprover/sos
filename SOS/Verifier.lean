@@ -218,7 +218,7 @@ theorem sos_strict_sound
     rw [hid]; exact cert.toPoly_aeval_nonneg gs φ hgs
   rw [CMvPolynomial.aeval_sub, CMvPolynomial.aeval_C] at h_diff
   have hε_real : (0 : ℝ) < (algebraMap ℚ ℝ) ε := by
-    rw [Algebra.algebraMap_eq_smul_one]; simpa using hε
+    show (0 : ℝ) < (ε : ℝ); exact_mod_cast hε
   linarith
 
 /-- **Soundness, infeasibility refutation.** -/

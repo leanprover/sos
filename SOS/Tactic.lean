@@ -265,9 +265,15 @@ inductive CloseMode where
   | strict (εE : Expr) (hεE : Expr)
   | infeasible
 
-/-- Unified close: builds `decide`-checked soundness application for
-the closed / strict / infeasible certificate and assigns the main goal.
-Mode-specific differences are tabulated in `CloseMode`. -/
+/-- Build a `decide +kernel`-checked proof of `cert.checks goal gs = true`. -/
+private def buildCheckProof (certE goalE gsListE : Expr) : TacticM Expr := do
+  let checksE ← mkAppM ``SOS.Certificate.checks #[certE, goalE, gsListE]
+  let trueE ← mkAppOptM ``Bool.true #[]
+  buildDecideTrue (← mkEq checksE trueE)
+
+/-- Unified close: builds `decide +kernel`-checked soundness application
+for the closed / strict / infeasible certificate and assigns the main
+goal. Mode-specific differences are tabulated in `CloseMode`. -/
 def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
     (mode : CloseMode) : TacticM Unit := Tactic.withMainContext do
   let n := parsed.atoms.size
@@ -278,45 +284,34 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
     buildHypothesisAevalProofsA n φE parsed.constraints
   let gsListE ← gsCMvListExpr n gPolys
   let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
-  -- Closed and strict need the conclusion polynomial; infeasible doesn't.
-  let pData? : Option (ParsedConclusionData n) ← do
-    match mode with
-    | .infeasible => pure none
-    | .closed | .strict .. =>
-      pure (some (← parsedConclusionData "sos" parsed n))
-  let goalE ← match mode, pData? with
-    | .closed, some p =>
-      mkAppOptM ``SOS.Goal.closed #[some nE, some p.cmv]
-    | .strict εE hεE, some p =>
-      mkAppOptM ``SOS.Goal.strict #[some nE, some p.cmv, some εE, some hεE]
-    | .infeasible, _ =>
-      mkAppOptM ``SOS.Goal.infeasible #[some nE]
-    | _, _ => throwError "sos: internal: pData missing for non-infeasible mode"
-  let checksE ← mkAppM ``SOS.Certificate.checks #[certE, goalE, gsListE]
-  let trueE ← mkAppOptM ``Bool.true #[]
-  let decProof ← buildDecideTrue (← mkEq checksE trueE)
-  match mode, pData? with
-  | .closed, some p =>
-    let hTarget ← mkAppM ``SOS.sos_sound
-      #[p.cmv, gsListE, certE, decProof, φE, hgsProof]
-    let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
-    let pE := Lean.toExpr p.tree
-    let final ← mkAppOptM ``SOS.nonneg_orig_of_aeval
-      #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
-    mv.assign final
-  | .strict εE hεE, some p =>
-    let hTarget ← mkAppM ``SOS.sos_strict_sound
-      #[p.cmv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
-    let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
-    let pE := Lean.toExpr p.tree
-    let final ← mkAppOptM ``SOS.pos_orig_of_aeval
-      #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
-    mv.assign final
-  | .infeasible, _ =>
-    let infeasibleProof ← mkAppM ``SOS.sos_infeasible_sound
-      #[gsListE, certE, decProof, φE, hgsProof]
-    mv.assign infeasibleProof
-  | _, _ => throwError "sos: internal: pData missing for non-infeasible mode"
+  let final ← match mode with
+    | .closed =>
+      let p ← parsedConclusionData "sos" parsed n
+      let goalE ← mkAppOptM ``SOS.Goal.closed #[some nE, some p.cmv]
+      let decProof ← buildCheckProof certE goalE gsListE
+      let hTarget ← mkAppM ``SOS.sos_sound
+        #[p.cmv, gsListE, certE, decProof, φE, hgsProof]
+      let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
+      let pE := Lean.toExpr p.tree
+      mkAppOptM ``SOS.nonneg_orig_of_aeval
+        #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
+    | .strict εE hεE =>
+      let p ← parsedConclusionData "sos" parsed n
+      let goalE ← mkAppOptM ``SOS.Goal.strict
+        #[some nE, some p.cmv, some εE, some hεE]
+      let decProof ← buildCheckProof certE goalE gsListE
+      let hTarget ← mkAppM ``SOS.sos_strict_sound
+        #[p.cmv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
+      let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
+      let pE := Lean.toExpr p.tree
+      mkAppOptM ``SOS.pos_orig_of_aeval
+        #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
+    | .infeasible =>
+      let goalE ← mkAppOptM ``SOS.Goal.infeasible #[some nE]
+      let decProof ← buildCheckProof certE goalE gsListE
+      mkAppM ``SOS.sos_infeasible_sound
+        #[gsListE, certE, decProof, φE, hgsProof]
+  mv.assign final
   Tactic.replaceMainGoal []
 
 /-! ### Tactic surface -/
