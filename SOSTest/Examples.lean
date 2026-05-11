@@ -387,13 +387,28 @@ example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos
 
 -- E2b. Search-driven, degree-1 cofactor. From `x = 1` conclude
 -- `0 ≤ x² − 1`. The search must discover `q := x + 1`:
--- `x² − 1 = (x + 1)(x − 1)`.
+-- `x² − 1 = (x + 1)(x − 1)`. The equality is load-bearing — without
+-- it the conclusion is false (take `x := 0`).
 example (x : ℝ) (_h : x = 1) : 0 ≤ x^2 - 1 := by sos
 
--- E2c. Strict positivity with an equality. `x² = 0 → 0 < x² + 1`
--- exercises the `runStrict` equality path: the LP-slack solve and the
--- feasibility re-solve must both include the cofactor blocks.
-example (x : ℝ) (_h : x^2 = 0) : 0 < x^2 + 1 := by sos
+-- E2b-control. The same conclusion without the equality hypothesis
+-- must fail, confirming E2b genuinely exercises the equality path.
+example : True := by
+  fail_if_success
+    (have : ∀ x : ℝ, 0 ≤ x^2 - 1 := by sos)
+  trivial
+
+-- E2c. Search-driven, strict positivity with equality. `x = 1` gives
+-- `x² = 1`, so `0 < x²`. Exercises `runStrict`'s equality path: both
+-- the λ-solve and the feasibility re-solve include cofactor blocks.
+-- Load-bearing: `0 < x²` is false at `x := 0`.
+example (x : ℝ) (_h : x = 1) : 0 < x^2 := by sos
+
+-- E2c-control. Same conclusion without the equality must fail.
+example : True := by
+  fail_if_success
+    (have : ∀ x : ℝ, 0 < x^2 := by sos)
+  trivial
 
 -- E3. Combine an inequality and an equality. From `0 ≤ x − 1` (i.e.
 -- `x ≥ 1`) and `x = 0` derive `False`.
@@ -422,12 +437,31 @@ recession directions for CSDP) means the search doesn't yet converge
 on them. Marked `FIXME`: provide via `sos_witness` for now, revisit
 when the cofactor SDP gets a regularisation pass. -/
 
--- FIXME sos.ml:1714 — `x*y = 1 → 0 ≤ x² + y² − x*y*(x+y)`.
--- Cofactor `q := x + y`: residual factors as `(x − y)²`.
+-- sos.ml:1647 — `x²+y²+z² = 1 → 0 ≤ 3 − (x+y+z)²`. Hand-crafted
+-- witness: cofactor `q := −3` (note sign — the reifier records the
+-- equality polynomial as `x²+y²+z² − 1`, so `−3 · (x²+y²+z² − 1)
+-- + (x−y)² + (y−z)² + (z−x)² = 3 − (x+y+z)²`).
+example (x y z : ℝ) (_h : x^2 + y^2 + z^2 = 1) :
+    0 ≤ 3 - (x + y + z)^2 := by
+  sos_witness
+    { sigma0 :=
+        { squares := [CMvPolynomial.X 0 - CMvPolynomial.X 1,
+                      CMvPolynomial.X 1 - CMvPolynomial.X 2,
+                      CMvPolynomial.X 2 - CMvPolynomial.X 0] },
+      sigmas := [],
+      eqCofs := [-CMvPolynomial.C (3 : ℚ)] }
+
+-- Control for sos.ml:1647: same conclusion without the equality must
+-- fail (false at `x := y := z := 2`).
+example : True := by
+  fail_if_success
+    (have : ∀ x y z : ℝ, 0 ≤ 3 - (x + y + z)^2 := by sos)
+  trivial
+
+-- FIXME sos.ml:1714 — `x*y = 1 → 0 ≤ x² + y² − x*y*(x+y)`. The search
+-- doesn't converge; we don't have a clean hand-cert with a low-degree
+-- cofactor either (working modulo `xy − 1` leaves the residual
+-- `x² + y² − x − y`, which is only nonneg on the variety `V(xy = 1)`
+-- and needs degree-≥-2 SOS work to certify globally).
 -- example (x y : ℝ) (_h : x*y = 1) :
 --     0 ≤ x^2 + y^2 - x*y*(x + y) := by sos
-
--- FIXME sos.ml:1647 — `x²+y²+z² = 1 → 0 ≤ 3 − (x+y+z)²`.
--- Cofactor `q := 3`: residual factors as a sum of `(x−y)²`-style.
--- example (x y z : ℝ) (_h : x^2 + y^2 + z^2 = 1) :
---     0 ≤ 3 - (x + y + z)^2 := by sos
