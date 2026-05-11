@@ -425,19 +425,31 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
 /-! ### Denominator schedule for rational rounding -/
 
 /-- Schedule of denominators tried by the rational rounder, adapted from
-`sos.ml`'s `find_rounding`. First small integers, then powers of two.
+`sos.ml`'s `find_rounding`. First a dense small-integer region
+(`[1..63]`), then powers of two interleaved with their 1.5× scalings
+(`64, 96, 128, 192, 256, 384, …, 2^20`).
+
+Harrison reports that "small ints first, then doubling" works
+empirically better than a strict doubling schedule — the densified
+small region and 1.5× interleaves catch Gram denominators that the
+old `[1..31] ++ [2^5..2^20]` schedule missed.
 
 Harrison's HOL Light caps at `2^66`; we cap at `2^20`. Beyond that
 range, CSDP rounding noise produces tiny positive `LDL` pivots whose
 `fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
-practical wall time. If a target genuinely needs a denom ≥ 2^20 to
-round cleanly, we treat the search as a fall-through and rely on
-`sos_witness <hand-cert>` (matching Harrison's documented rounding
-caveat). -/
+practical wall time. `sos.maxRoundingDenom` (see `SOS/Tactic.lean`)
+filters the *full* candidate list — schedule entries, `polyDenom target`,
+constraint denoms, and cross denoms — against the cap; the schedule
+itself still tops out at `2^20`. Targets needing a strictly larger
+denom fall through to `sos_witness <hand-cert>`. -/
 def niceDenominators : List ℚ :=
-  let smalls : List ℚ := (List.range 31).map (fun i => (i + 1 : ℚ))
-  let powTwo : List ℚ := (List.range 16).map (fun i => (2 ^ (i + 5) : ℚ))
-  smalls ++ powTwo
+  let smalls : List ℚ := (List.range 63).map (fun i => (i + 1 : ℚ))
+  -- For k = 6..19, alternate `2^k` and `3·2^(k-1) = 1.5·2^k`; then `2^20`.
+  let bigs : List ℚ :=
+    (List.range 14).flatMap
+        (fun i => [(2 ^ (i + 6) : ℚ), ((3 : ℚ) * 2 ^ (i + 5))])
+      ++ [(2 ^ 20 : ℚ)]
+  smalls ++ bigs
 
 /-- Round a single float to the nearest rational at denominator `d`,
 using round-half-away-from-zero on the numerator. -/
@@ -552,11 +564,14 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
   return none
 
 /-- Try a single SDP encoding (one choice of `useTraceCost`) and the
-denominator schedule. Returns `none` if CSDP fails or no rounding
-validates. -/
+denominator schedule. Candidates are filtered against `maxRoundingDenom`
+(default `2^20`); raise it via the `sos.maxRoundingDenom` option for
+targets whose Gram needs a larger denom. Returns `none` if CSDP fails
+or no rounding validates. -/
 private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
-    (goal : Goal n) (useTraceCost : Bool) : IO (Option (Certificate n)) := do
+    (goal : Goal n) (useTraceCost : Bool)
+    (maxRoundingDenom : Nat := 1048576) : IO (Option (Certificate n)) := do
   let (problem, blocks, eqSpecs, _monos, _) :=
     buildSdp target gs (.feasibility useTraceCost) ps
   if problem.b.size = 0 then
@@ -572,19 +587,31 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
   let targetDenom : ℚ := (polyDenom target : ℚ)
   let constraintDenoms : List ℚ := gs.map fun g => (polyDenom g : ℚ)
   let equalityDenoms : List ℚ := ps.map fun p => (polyDenom p : ℚ)
+  -- Heuristic extra candidates: the σᵢ-block Gram for constraint `gᵢ`
+  -- often needs a denominator divisible by factors from both `target`
+  -- and `gᵢ`. `polyDenom (target * gᵢ)` is a cheap shot at that grid
+  -- (not a guaranteed superset of the true Gram denom — but often
+  -- closer than either input alone).
+  let crossDenoms : List ℚ := gs.map fun g => (polyDenom (target * g) : ℚ)
   let denomCandidates : List ℚ :=
-    targetDenom :: constraintDenoms ++ equalityDenoms ++ niceDenominators
+    targetDenom :: constraintDenoms ++ crossDenoms ++ equalityDenoms
+      ++ niceDenominators
+  let maxDenomQ : ℚ := (maxRoundingDenom : ℚ)
   for d in denomCandidates do
-    if let some cert := tryDenominator gs ps blocks eqSpecs sol d goal then
-      return some cert
+    if d ≤ maxDenomQ then
+      if let some cert := tryDenominator gs ps blocks eqSpecs sol d goal then
+        return some cert
   return none
 
 /-- Closed-positivity / infeasibility search: produce a Certificate
 proving `target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ` for the chosen `target`.
-The equality list `ps` may be empty. -/
+The equality list `ps` may be empty. `maxRoundingDenom` caps the
+denominator schedule (default `2^20`; raise via the
+`sos.maxRoundingDenom` option from the tactic). -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
-    (goal : Goal n) : IO (Option (Certificate n)) := do
+    (goal : Goal n) (maxRoundingDenom : Nat := 1048576) :
+    IO (Option (Certificate n)) := do
   -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
   -- HOL Light convention) but interacts badly with infeasibility
@@ -597,7 +624,8 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     | .infeasible => [false]
     | _           => [true, false]
   for useTraceCost in strategies do
-    if let some cert ← tryOneSdp target gs ps goal useTraceCost then
+    if let some cert ← tryOneSdp target gs ps goal useTraceCost maxRoundingDenom
+      then
       return some cert
   return none
 
@@ -639,7 +667,8 @@ below a clean power of two, we still try the natural largest `ε`.
 Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
 window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
-    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := []) :
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
+    (maxRoundingDenom : Nat := 1048576) :
     IO (Option (StrictResult n)) := do
   let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
     buildSdp p gs .lpSlack ps
@@ -665,7 +694,7 @@ def runStrict (p : CMvPolynomial n ℚ)
     if hε : 0 < ε then
       let goal : Goal n := .strict p ε hε
       let targetPoly := p - CMvPolynomial.C ε
-      match (← runFeasibilitySearch targetPoly gs ps goal) with
+      match (← runFeasibilitySearch targetPoly gs ps goal maxRoundingDenom) with
       | some cert => return some { cert, ε, hε }
       | none => pure ()
   return none
@@ -676,11 +705,12 @@ positivity has its own entry point: `runStrict`; the `.strict` arm
 here is a defensive `none` for direct callers (the tactic surface
 routes `.strict` goals straight to `runStrict`). -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ))
-    (ps : List (CMvPolynomial n ℚ) := []) :
+    (ps : List (CMvPolynomial n ℚ) := [])
+    (maxRoundingDenom : Nat := 1048576) :
     IO (Option (Certificate n)) := do
   match goal with
-  | .closed p   => runFeasibilitySearch p gs ps goal
-  | .infeasible => runFeasibilitySearch (-1) gs ps goal
+  | .closed p   => runFeasibilitySearch p gs ps goal maxRoundingDenom
+  | .infeasible => runFeasibilitySearch (-1) gs ps goal maxRoundingDenom
   | .strict ..  => return none
 
 end SOS.Search
