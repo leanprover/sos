@@ -50,12 +50,17 @@ def Goal.target {n : Nat} : Goal n → CMvPolynomial n ℚ
   | .strict p ε _ => p - CMvPolynomial.C ε
   | .infeasible   => -1
 
-/-- A Putinar-style Positivstellensatz certificate. The list `sigmas`
-provides one SOS multiplier per constraint, paired by position with
-the externally-supplied constraint list `gs`. -/
+/-- A full Positivstellensatz certificate. `sigmas` provides one SOS
+multiplier per inequality constraint `gᵢ`. `eqCofs` provides one free
+polynomial cofactor `qⱼ` per equality constraint `pⱼ`; the equality
+contribution is `qⱼ · pⱼ`. The cofactors are unrestricted in sign
+(they are not required to be sums of squares). -/
 structure Certificate (n : Nat) where
   sigma0 : SOSDecomp n
   sigmas : List (SOSDecomp n)
+  /-- One free polynomial cofactor `qⱼ` per equality constraint `pⱼ`.
+  Empty (default) when the goal has no equality hypotheses. -/
+  eqCofs : List (CMvPolynomial n ℚ) := []
   deriving Inhabited
 
 /-- Sum of `σᵢ.toPoly * gᵢ` over paired lists. -/
@@ -64,29 +69,42 @@ def Certificate.constraintSum {n : Nat}
     CMvPolynomial n ℚ :=
   (sigmas.zip gs).foldr (fun pair acc => acc + pair.fst.toPoly * pair.snd) 0
 
-/-- The full polynomial expansion `σ₀ + Σᵢ σᵢ · gᵢ` of a certificate
-evaluated against constraints `gs`. -/
+/-- Sum of `qⱼ * pⱼ` over paired lists of free cofactors and equality
+polynomials. -/
+def Certificate.equalitySum {n : Nat}
+    (eqCofs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ)) :
+    CMvPolynomial n ℚ :=
+  (eqCofs.zip ps).foldr (fun pair acc => acc + pair.fst * pair.snd) 0
+
+/-- The full polynomial expansion
+`σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ` of a certificate evaluated against
+inequality constraints `gs` and equality constraints `ps`. -/
 def Certificate.toPoly {n : Nat} (c : Certificate n)
-    (gs : List (CMvPolynomial n ℚ)) : CMvPolynomial n ℚ :=
-  c.sigma0.toPoly + Certificate.constraintSum c.sigmas gs
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ)) :
+    CMvPolynomial n ℚ :=
+  c.sigma0.toPoly +
+    Certificate.constraintSum c.sigmas gs +
+    Certificate.equalitySum c.eqCofs ps
 
-/-- Certificate validity check. We rely on CompPoly's
-`Lawful.instDecidableEq` (automatic for `ℚ` coefficients) to make
-polynomial equality kernel-checkable via `decide +kernel`. -/
+/-- Certificate validity check. Confirms length agreement on both the
+inequality and equality constraint lists, then checks the polynomial
+identity `goal.target = c.toPoly gs ps` via `decide +kernel`. -/
 def Certificate.checks {n : Nat} (c : Certificate n) (goal : Goal n)
-    (gs : List (CMvPolynomial n ℚ)) : Bool :=
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ)) : Bool :=
   (c.sigmas.length == gs.length) &&
-  decide (goal.target = c.toPoly gs)
+  (c.eqCofs.length == ps.length) &&
+  decide (goal.target = c.toPoly gs ps)
 
-/-- Bridge lemma: `checks goal gs = true` is equivalent to the polynomial
-identity `goal.target = c.toPoly gs` together with the length match. -/
+/-- Bridge lemma: `checks goal gs ps = true` is equivalent to the
+polynomial identity together with the two length matches. -/
 theorem Certificate.checks_iff {n : Nat} (c : Certificate n) (goal : Goal n)
-    (gs : List (CMvPolynomial n ℚ)) :
-    c.checks goal gs = true ↔
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ)) :
+    c.checks goal gs ps = true ↔
       c.sigmas.length = gs.length ∧
-      goal.target = c.toPoly gs := by
+      c.eqCofs.length = ps.length ∧
+      goal.target = c.toPoly gs ps := by
   unfold Certificate.checks
-  simp [decide_eq_true_eq]
+  simp [decide_eq_true_eq, and_assoc]
 
 /-! ### Building certificates from `SOS.Poly`-form data
 
@@ -101,11 +119,13 @@ entry through `SOS.Poly.toCMv`. -/
 def SOSDecomp.fromPolys {n : Nat} (squares : List (SOS.Poly n)) : SOSDecomp n :=
   { squares := squares.map SOS.Poly.toCMv }
 
-/-- Build a `Certificate n` from `SOS.Poly`-keyed σ₀ / σᵢ data. -/
+/-- Build a `Certificate n` from `SOS.Poly`-keyed σ₀ / σᵢ / qⱼ data. -/
 def Certificate.fromDecompiled {n : Nat}
     (sigma0Polys : List (SOS.Poly n))
-    (sigmasPolys : List (List (SOS.Poly n))) : Certificate n :=
+    (sigmasPolys : List (List (SOS.Poly n)))
+    (eqCofPolys : List (SOS.Poly n) := []) : Certificate n :=
   { sigma0 := SOSDecomp.fromPolys sigma0Polys,
-    sigmas := sigmasPolys.map SOSDecomp.fromPolys }
+    sigmas := sigmasPolys.map SOSDecomp.fromPolys,
+    eqCofs := eqCofPolys.map SOS.Poly.toCMv }
 
 end SOS

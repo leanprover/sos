@@ -157,20 +157,11 @@ private def gsCMvListExpr (n : Nat) (gs : List (SOS.Poly n)) : MetaM Expr := do
     acc ← mkAppOptM ``List.cons #[some cmvTy, some gCMv, some acc]
   return acc
 
-/-- Build a proof of `∀ g ∈ gsList, 0 ≤ CMvPolynomial.aeval x g`, given
-per-hypothesis proofs `hAevalProofs i : 0 ≤ aeval x gs[i].toCMv`. -/
-private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
-    (hAevalProofs : List Expr) : MetaM Expr := do
+/-- Build a proof of `∀ g ∈ gsList, P g` from per-element proofs `hP i :
+P gs[i].toCMv`, given the predicate `P` as a one-argument lambda. -/
+private def buildForallMemProofGen (n : Nat) (gs : List (SOS.Poly n))
+    (hAevalProofs : List Expr) (predicate : Expr) : MetaM Expr := do
   let cmvTy ← cmvType n
-  -- predicate: fun g => 0 ≤ aeval x g
-  let predicate ← withLocalDeclD `g cmvTy fun gFV => do
-    let body ← mkAppM ``LE.le
-      #[(← mkAppOptM ``OfNat.ofNat
-          #[some realTy, some (Lean.mkNatLit 0), none]),
-        (← mkAppOptM ``CPoly.CMvPolynomial.aeval
-          #[some (Lean.mkNatLit n), some ratTy, some realTy,
-            none, none, none, some xE, some gFV])]
-    mkLambdaFVars #[gFV] body
   let mut accList ← mkAppOptM ``List.nil #[some cmvTy]
   let mut accProof ← mkAppOptM ``List.forall_mem_nil #[some cmvTy, some predicate]
   for (g, hP) in (gs.zip hAevalProofs).reverse do
@@ -183,6 +174,36 @@ private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
     accList := newList
   return accProof
 
+/-- Build a proof of `∀ g ∈ gsList, 0 ≤ CMvPolynomial.aeval x g`, given
+per-hypothesis proofs `hAevalProofs i : 0 ≤ aeval x gs[i].toCMv`. -/
+private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
+    (hAevalProofs : List Expr) : MetaM Expr := do
+  let cmvTy ← cmvType n
+  let predicate ← withLocalDeclD `g cmvTy fun gFV => do
+    let body ← mkAppM ``LE.le
+      #[(← mkAppOptM ``OfNat.ofNat
+          #[some realTy, some (Lean.mkNatLit 0), none]),
+        (← mkAppOptM ``CPoly.CMvPolynomial.aeval
+          #[some (Lean.mkNatLit n), some ratTy, some realTy,
+            none, none, none, some xE, some gFV])]
+    mkLambdaFVars #[gFV] body
+  buildForallMemProofGen n gs hAevalProofs predicate
+
+/-- Build a proof of `∀ p ∈ psList, CMvPolynomial.aeval x p = 0`, given
+per-hypothesis proofs `hP i : aeval x ps[i].toCMv = 0`. -/
+private def buildForallMemEqZeroProof (n : Nat) (xE : Expr)
+    (ps : List (SOS.Poly n)) (hAevalProofs : List Expr) : MetaM Expr := do
+  let cmvTy ← cmvType n
+  let predicate ← withLocalDeclD `q cmvTy fun gFV => do
+    let lhs ← mkAppOptM ``CPoly.CMvPolynomial.aeval
+      #[some (Lean.mkNatLit n), some ratTy, some realTy,
+        none, none, none, some xE, some gFV]
+    let zero ← mkAppOptM ``OfNat.ofNat
+      #[some realTy, some (Lean.mkNatLit 0), none]
+    let body ← mkEq lhs zero
+    mkLambdaFVars #[gFV] body
+  buildForallMemProofGen n ps hAevalProofs predicate
+
 /-- Discharge the `cert.checks goal gs = true` side condition by
 `decide +kernel`. Kernel reduction handles `Std.ExtTreeMap` lookups
 and rational arithmetic at the witness denominators the search
@@ -193,49 +214,70 @@ private def buildDecideTrue (type : Expr) : TacticM Expr := do
 
 /-! ### Per-hypothesis bridged proofs
 
-Builds `0 ≤ aeval φ g_i.toCMv` from the parser's hypothesis FVars,
-dispatching on `ConstraintKind`. -/
+Builds `0 ≤ aeval φ g_i.toCMv` for inequality constraints and
+`aeval φ p_j.toCMv = 0` for equality constraints, dispatching on
+`ConstraintKind`. -/
 
-/-- Build per-hypothesis bridged proofs `0 ≤ aeval φ g_i.toCMv` from
-the ParsedGoal's constraints, using `aeval_nonneg_of_orig` (or
-`_neg` for `.nonpos`, or `le_of_lt` lifting for `.pos`). -/
+/-- Bundle of bridged proofs partitioned by constraint kind. -/
+private structure BridgedConstraints (n : Nat) where
+  ineqProofs : List Expr
+  ineqPolys  : List (SOS.Poly n)
+  eqProofs   : List Expr
+  eqPolys    : List (SOS.Poly n)
+
+/-- Build per-hypothesis bridged proofs from the ParsedGoal's
+constraints, partitioning into inequality and equality halves. -/
 private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
     (constraints : Array SOS.Reify.ConstraintInfo) :
-    TacticM (List Expr × List (SOS.Poly n)) := do
+    TacticM (BridgedConstraints n) := do
   let nE := Lean.mkNatLit n
-  let mut acc : Array Expr := Array.mkEmpty constraints.size
-  let mut polys : Array (SOS.Poly n) := Array.mkEmpty constraints.size
+  let mut accIneq : Array Expr := #[]
+  let mut polysIneq : Array (SOS.Poly n) := #[]
+  let mut accEq : Array Expr := #[]
+  let mut polysEq : Array (SOS.Poly n) := #[]
   for c in constraints do
     let some gTree := castRawToPoly c.raw n |
       throwError "sos: constraint poly's maxAtomBound exceeds n = {n}"
     let hExpr := Lean.mkFVar c.fvar
     let gE := Lean.toExpr gTree
-    polys := polys.push gTree
     match c.kind with
     | .nonneg =>
       let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
         #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hExpr]
-      acc := acc.push aProof
+      accIneq := accIneq.push aProof
+      polysIneq := polysIneq.push gTree
     | .nonpos =>
-      -- gTree's evalReal yields `-orig` because the reifier already
-      -- wrapped the orig poly in `Raw.neg`.
       let negOrig ← mkAppM ``Neg.neg #[c.orig]
       let eqProof ← buildAtomicBridgeEq n φE gTree negOrig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig_neg
         #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hExpr]
-      acc := acc.push aProof
+      accIneq := accIneq.push aProof
+      polysIneq := polysIneq.push gTree
     | .pos =>
-      -- Hypothesis is `0 < orig`; promote to `0 ≤ orig`.
       let hLeExpr ← mkAppM ``le_of_lt #[hExpr]
       let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
         #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hLeExpr]
-      acc := acc.push aProof
-  return (acc.toList, polys.toList)
+      accIneq := accIneq.push aProof
+      polysIneq := polysIneq.push gTree
+    | .eq =>
+      -- `c.orig` is the difference `a − b`; `c.fvar : a = b`.
+      -- Bridge: `evalReal x p = a − b`. Combined with
+      -- `sub_eq_zero_of_eq h : a − b = 0` we get `aeval x p.toCMv = 0`
+      -- via `aeval_eq_zero_of_orig`.
+      let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
+      let hSubZero ← mkAppM ``sub_eq_zero_of_eq #[hExpr]
+      let aProof ← mkAppOptM ``SOS.aeval_eq_zero_of_orig
+        #[some nE, some φE, some gE, some c.orig,
+          some eqProof, some hSubZero]
+      accEq := accEq.push aProof
+      polysEq := polysEq.push gTree
+  return { ineqProofs := accIneq.toList, ineqPolys := polysIneq.toList,
+           eqProofs := accEq.toList, eqPolys := polysEq.toList }
 
 /-- Closed and strict goals carry a conclusion polynomial plus the
 original user expression it must bridge back to. -/
@@ -265,9 +307,12 @@ inductive CloseMode where
   | strict (εE : Expr) (hεE : Expr)
   | infeasible
 
-/-- Build a `decide +kernel`-checked proof of `cert.checks goal gs = true`. -/
-private def buildCheckProof (certE goalE gsListE : Expr) : TacticM Expr := do
-  let checksE ← mkAppM ``SOS.Certificate.checks #[certE, goalE, gsListE]
+/-- Build a `decide +kernel`-checked proof of
+`cert.checks goal gs ps = true`. -/
+private def buildCheckProof (certE goalE gsListE psListE : Expr) :
+    TacticM Expr := do
+  let checksE ← mkAppM ``SOS.Certificate.checks
+    #[certE, goalE, gsListE, psListE]
   let trueE ← mkAppOptM ``Bool.true #[]
   buildDecideTrue (← mkEq checksE trueE)
 
@@ -280,17 +325,18 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
   let nE := Lean.mkNatLit n
   let mv ← Tactic.getMainGoal
   let φE ← buildFinValExpr parsed.atoms
-  let (hAevalProofs, gPolys) ←
-    buildHypothesisAevalProofsA n φE parsed.constraints
-  let gsListE ← gsCMvListExpr n gPolys
-  let hgsProof ← buildForallMemProof n φE gPolys hAevalProofs
+  let bridged ← buildHypothesisAevalProofsA n φE parsed.constraints
+  let gsListE ← gsCMvListExpr n bridged.ineqPolys
+  let psListE ← gsCMvListExpr n bridged.eqPolys
+  let hgsProof ← buildForallMemProof n φE bridged.ineqPolys bridged.ineqProofs
+  let hpsProof ← buildForallMemEqZeroProof n φE bridged.eqPolys bridged.eqProofs
   let final ← match mode with
     | .closed =>
       let p ← parsedConclusionData "sos" parsed n
       let goalE ← mkAppOptM ``SOS.Goal.closed #[some nE, some p.cmv]
-      let decProof ← buildCheckProof certE goalE gsListE
+      let decProof ← buildCheckProof certE goalE gsListE psListE
       let hTarget ← mkAppM ``SOS.sos_sound
-        #[p.cmv, gsListE, certE, decProof, φE, hgsProof]
+        #[p.cmv, gsListE, psListE, certE, decProof, φE, hgsProof, hpsProof]
       let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
       let pE := Lean.toExpr p.tree
       mkAppOptM ``SOS.nonneg_orig_of_aeval
@@ -299,18 +345,19 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
       let p ← parsedConclusionData "sos" parsed n
       let goalE ← mkAppOptM ``SOS.Goal.strict
         #[some nE, some p.cmv, some εE, some hεE]
-      let decProof ← buildCheckProof certE goalE gsListE
+      let decProof ← buildCheckProof certE goalE gsListE psListE
       let hTarget ← mkAppM ``SOS.sos_strict_sound
-        #[p.cmv, εE, hεE, gsListE, certE, decProof, φE, hgsProof]
+        #[p.cmv, εE, hεE, gsListE, psListE, certE, decProof, φE,
+          hgsProof, hpsProof]
       let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
       let pE := Lean.toExpr p.tree
       mkAppOptM ``SOS.pos_orig_of_aeval
         #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
     | .infeasible =>
       let goalE ← mkAppOptM ``SOS.Goal.infeasible #[some nE]
-      let decProof ← buildCheckProof certE goalE gsListE
+      let decProof ← buildCheckProof certE goalE gsListE psListE
       mkAppM ``SOS.sos_infeasible_sound
-        #[gsListE, certE, decProof, φE, hgsProof]
+        #[gsListE, psListE, certE, decProof, φE, hgsProof, hpsProof]
   mv.assign final
   Tactic.replaceMainGoal []
 
@@ -327,28 +374,35 @@ quoted via `SOS.Poly.decompile` so each square round-trips through
 private structure DecompiledCertificate (n : Nat) where
   sigma0 : List (SOS.Poly n)
   sigmas : List (List (SOS.Poly n))
+  eqCofs : List (SOS.Poly n) := []
 
 private def decompileCertificate {n : Nat}
     (cert : SOS.Certificate n) : DecompiledCertificate n :=
   { sigma0 := cert.sigma0.squares.map SOS.Poly.decompile,
-    sigmas := cert.sigmas.map (·.squares.map SOS.Poly.decompile) }
+    sigmas := cert.sigmas.map (·.squares.map SOS.Poly.decompile),
+    eqCofs := cert.eqCofs.map SOS.Poly.decompile }
 
 private def certExprOfDecompiled (n : Nat)
     (cert : DecompiledCertificate n) : MetaM Expr := do
   let sigma0E := Lean.toExpr cert.sigma0
   let sigmasE := Lean.toExpr cert.sigmas
+  let eqCofsE := Lean.toExpr cert.eqCofs
   mkAppOptM ``SOS.Certificate.fromDecompiled
-    #[some (Lean.mkNatLit n), some sigma0E, some sigmasE]
+    #[some (Lean.mkNatLit n), some sigma0E, some sigmasE, some eqCofsE]
 
-/-- Cast each constraint's `Raw` to the typed `Poly n`. -/
+/-- Cast each constraint's `Raw` to the typed `Poly n`. Returns
+`(inequality polys, equality polys)`, partitioned by `ConstraintKind`. -/
 private def castConstraints (constraints : Array SOS.Reify.ConstraintInfo)
-    (n : Nat) : TacticM (List (SOS.Poly n)) := do
-  let mut acc : Array (SOS.Poly n) := Array.mkEmpty constraints.size
+    (n : Nat) : TacticM (List (SOS.Poly n) × List (SOS.Poly n)) := do
+  let mut accIneq : Array (SOS.Poly n) := #[]
+  let mut accEq : Array (SOS.Poly n) := #[]
   for c in constraints do
     let some gT := castRawToPoly c.raw n |
       throwError "sos: constraint poly's maxAtomBound > n = {n}"
-    acc := acc.push gT
-  return acc.toList
+    match c.kind with
+    | .nonneg | .nonpos | .pos => accIneq := accIneq.push gT
+    | .eq => accEq := accEq.push gT
+  return (accIneq.toList, accEq.toList)
 
 /-- Build the `LT.lt 0 ε` proof needed by `closeSos (.strict εE hεE)`,
 given the `ε` returned by the search. -/
@@ -424,12 +478,21 @@ private def formatSigmasList {n : Nat}
   let entries := ds.map fun sqs => s!"\{ squares := {formatSquares sqs} }"
   "[" ++ ", ".intercalate entries ++ "]"
 
+/-- Render a list of polynomial cofactors as a Lean source literal
+`[q₀, q₁, …]` for the `eqCofs` field. -/
+private def formatEqCofsList {n : Nat} (qs : List (SOS.Poly n)) : String :=
+  "[" ++ ", ".intercalate (qs.map (fun p => formatPoly p)) ++ "]"
+
 /-- Render a runtime `SOS.Certificate n` as a Lean source literal
-suitable as the argument to `sos_witness`. -/
+suitable as the argument to `sos_witness`. Includes `eqCofs := …` when
+the certificate carries equality cofactors. -/
 private def formatDecompiledCertificate {n : Nat}
     (cert : DecompiledCertificate n) : String :=
+  let eqSuffix :=
+    if cert.eqCofs.isEmpty then ""
+    else s!", eqCofs := {formatEqCofsList cert.eqCofs}"
   s!"\{ sigma0 := \{ squares := {formatSquares cert.sigma0} }, \
-     sigmas := {formatSigmasList cert.sigmas} }"
+     sigmas := {formatSigmasList cert.sigmas}{eqSuffix} }"
 
 /-- Format an ε rational as a Lean source literal (`(num : ℚ)` or
 `((num : ℚ) / den)`), suitable for the `with ε := …` clause. -/
@@ -462,8 +525,9 @@ prefix (`"sos"` vs `"sos?"`) is taken from `tag`. -/
 private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
     (suggest? : Option Syntax) (tag : String) : TacticM Unit := do
   let n := parsed.atoms.size
-  let gPolys ← castConstraints parsed.constraints n
+  let (gPolys, pPolys) ← castConstraints parsed.constraints n
   let gsCMv := gPolys.map SOS.Poly.toCMv
+  let psCMv := pPolys.map SOS.Poly.toCMv
   let withFoundCert (cert : SOS.Certificate n) (mode : CloseMode)
       (ε? : Option ℚ) : TacticM Unit := do
     let decompiled := decompileCertificate cert
@@ -475,16 +539,16 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
   | .closed =>
     let p ← parsedConclusionData s!"{tag} (closed)" parsed n
     let goal : SOS.Goal n := .closed p.tree.toCMv
-    match (← (SOS.Search.runSearch goal gsCMv : IO _)) with
+    match (← (SOS.Search.runSearch goal gsCMv psCMv : IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
     | some cert => withFoundCert cert .closed none
   | .infeasible =>
-    match (← (SOS.Search.runSearch .infeasible gsCMv : IO _)) with
+    match (← (SOS.Search.runSearch .infeasible gsCMv psCMv : IO _)) with
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
-    match (← (SOS.Search.runStrict p.tree.toCMv gsCMv : IO _)) with
+    match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε

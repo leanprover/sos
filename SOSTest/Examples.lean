@@ -362,3 +362,42 @@ the end-to-end `by sos` examples above. -/
       (#[] : Array (CMvPolynomial 1 ℚ)) with
   | none => true
   | some _ => false
+
+/-! ### Equality hypotheses
+
+The certificate gains a free polynomial cofactor `qⱼ` per equality `pⱼ
+= 0`. The verified identity becomes
+`target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ`.
+
+The reifier maps `a = b` to `pⱼ := a − b`; downstream the cofactor
+search is free to discover any sign for `qⱼ`. -/
+
+-- E1. sos_witness for an equality goal: from `x*y = 1` conclude
+-- `0 ≤ x*y − 1`. Cofactor `q := 1` against the equality polynomial
+-- `p := x*y − 1` gives `x*y − 1 = 0 + 1 · (x*y − 1)`.
+example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by
+  sos_witness
+    { sigma0 := { squares := [] },
+      sigmas := [],
+      eqCofs := [CMvPolynomial.C (1 : ℚ)] }
+
+-- E2. Search-driven equality goal. Same identity as E1 — the cofactor
+-- search should discover `q := 1` automatically.
+example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos
+
+-- E3. Combine an inequality and an equality. From `0 ≤ x − 1` (i.e.
+-- `x ≥ 1`) and `x = 0` derive `False`.
+-- Certificate: `−1 = 0 + 1 · (x − 1) + (−1) · x`.
+example (x : ℝ) (_hx : 0 ≤ x - 1) (_hxz : x = 0) : False := by
+  sos_witness
+    { sigma0 := { squares := [] },
+      sigmas := [{ squares := [CMvPolynomial.C (1 : ℚ)] }],
+      eqCofs := [-CMvPolynomial.C (1 : ℚ)] }
+
+-- E4. `sos?` on an equality goal — the suggestion includes `eqCofs := …`.
+/--
+info: Try this:
+  [apply] sos_witness { sigma0 := { squares := [] }, sigmas := [], eqCofs := [CMvPolynomial.C (1 : ℚ)] }
+-/
+#guard_msgs in
+example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos?
