@@ -106,6 +106,11 @@ def monomialsUpTo (n d : Nat) : Array (CMvMonomial n) :=
 @[inline] def multiplierBasisDeg (targetDeg : Nat) (gDeg : Nat) : Nat :=
   if targetDeg < gDeg then 0 else halfCeil (targetDeg - gDeg)
 
+/-- The cofactor basis-degree bound for an equality polynomial `pⱼ`.
+The cofactor `qⱼ` needs degree headroom up to `σ₀Deg − pⱼ.totalDegree`. -/
+@[inline] def cofactorBasisDeg (targetDeg : Nat) (pDeg : Nat) : Nat :=
+  if targetDeg < pDeg then 0 else targetDeg - pDeg
+
 /-! ### Building per-block bases -/
 
 /-- Per-block data: the basis (monomials), the multiplier polynomial
@@ -121,39 +126,66 @@ namespace BlockSpec
 @[inline] def size (b : BlockSpec n) : Nat := b.basis.size
 end BlockSpec
 
+/-- Per-equality cofactor data: basis of monomials and the equality
+polynomial `pⱼ`. The cofactor coefficients are unrestricted in sign
+and encoded via two LP diagonal blocks (`x⁺`, `x⁻`) downstream. -/
+structure EqCofactorSpec (n : Nat) where
+  basis  : Array (CMvMonomial n)
+  eqPoly : CMvPolynomial n ℚ
+
+instance : Inhabited (EqCofactorSpec n) where
+  default := { basis := #[], eqPoly := CMvPolynomial.C 0 }
+
+namespace EqCofactorSpec
+@[inline] def size (e : EqCofactorSpec n) : Nat := e.basis.size
+end EqCofactorSpec
+
 /-- Build the per-block specs from the target polynomial and constraint
-list. Block 0 is σ₀ (multiplier = 1); block i+1 is σᵢ (multiplier = gᵢ). -/
+list. Block 0 is σ₀ (multiplier = 1); block i+1 is σᵢ (multiplier = gᵢ).
+The `ps` argument provides equality polynomials whose total degree
+participates in σ₀ sizing — `target = σ₀ + Σᵢ σᵢ·gᵢ + Σⱼ qⱼ·pⱼ` may
+need σ₀ to absorb cancellations against `qⱼ·pⱼ` of degree close to
+`σ₀Deg`. -/
 def buildBlocks (target : CMvPolynomial n ℚ)
-    (gs : List (CMvPolynomial n ℚ)) : Array (BlockSpec n) := Id.run do
+    (gs : List (CMvPolynomial n ℚ))
+    (ps : List (CMvPolynomial n ℚ) := []) : Array (BlockSpec n) := Id.run do
   let targetDeg := target.totalDegree
-  -- The Putinar identity `target = σ₀ + Σᵢ σᵢ·gᵢ` allows `deg(σ₀)` to
-  -- reach `max(deg(target), max_i deg(σᵢ·gᵢ)) ≤ max(deg(target), max_i
-  -- deg(gᵢ) + deg(σᵢ))`. For infeasibility (`target = -1`) the σ₀
-  -- terms must cancel against constraint products, so we size the
-  -- basis using the maximum constraint degree as well.
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
-  let σ₀Deg := Nat.max targetDeg maxGDeg
+  let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
+  let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
   let mut blocks : Array (BlockSpec n) := #[]
-  -- Block 0: σ₀.
-  -- Heuristic: drop the constant monomial from the σ₀ basis when the
-  -- target has no constant term. The corresponding `M[0][0]` would be
-  -- forced to zero, leaving CSDP's interior-point step on the boundary
-  -- of PSD and stalling its line search.
   let σ₀Basis := monomialsUpTo n (halfCeil σ₀Deg)
   let σ₀Basis :=
     if target.coeff (zeroMono n) = 0 then
       σ₀Basis.filter (fun m => m ≠ zeroMono n)
     else σ₀Basis
   blocks := blocks.push { basis := σ₀Basis, multiplier := CMvPolynomial.C 1 }
-  -- Blocks 1..m: σᵢ for each gᵢ.
   for g in gs do
     let gDeg := g.totalDegree
     let basisDeg := multiplierBasisDeg σ₀Deg gDeg
     let basis := monomialsUpTo n basisDeg
-    -- Always include at least the constant monomial.
     let basis := if basis.size == 0 then monomialsUpTo n 0 else basis
     blocks := blocks.push { basis := basis, multiplier := g }
   return blocks
+
+/-- Build per-equality cofactor specs. The cofactor basis for `pⱼ` has
+degree `cofactorBasisDeg σ₀Deg deg(pⱼ)`, computed against the same
+`σ₀Deg` that drives `buildBlocks`. -/
+def buildEqCofactorSpecs (target : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ)) :
+    Array (EqCofactorSpec n) := Id.run do
+  let targetDeg := target.totalDegree
+  let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
+  let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
+  let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
+  let mut specs : Array (EqCofactorSpec n) := #[]
+  for p in ps do
+    let pDeg := p.totalDegree
+    let cofDeg := cofactorBasisDeg σ₀Deg pDeg
+    let basis := monomialsUpTo n cofDeg
+    let basis := if basis.size == 0 then monomialsUpTo n 0 else basis
+    specs := specs.push { basis, eqPoly := p }
+  return specs
 
 /-! ### Rational ↔ Float -/
 
@@ -186,6 +218,19 @@ structure CachedProduct (n : Nat) where
   k        : Nat
   support  : Array (CMvMonomial n × ℚ)
 
+/-- One cached `(equality j, basis index b)` product `monomial_b · pⱼ`
+as its sparse support. -/
+structure CachedEqProduct (n : Nat) where
+  eqIdx    : Nat
+  basisIdx : Nat
+  support  : Array (CMvMonomial n × ℚ)
+
+/-- Compute `monomial_b · pⱼ` as a polynomial. -/
+private def eqProduct (spec : EqCofactorSpec n) (b : Nat) :
+    CMvPolynomial n ℚ :=
+  let mb : CMvPolynomial n ℚ := CMvPolynomial.monomial spec.basis[b]! (1 : ℚ)
+  mb * spec.eqPoly
+
 /-! ### CSDP problem construction -/
 
 /-- Which SDP we're building.
@@ -212,42 +257,62 @@ inductive SdpMode where
   | lpSlack
   deriving Inhabited
 
-/-- Build the SDP encoding `target = σ₀ + Σᵢ σᵢ · gᵢ` for the chosen
-`mode`. Returns the CSDP problem, the σ-block specs (excluding the
-λ block in `.lpSlack` mode), the monomial array indexing CSDP
-constraints, and (for `.lpSlack`) the 0-based index of the λ block in
-`Solution.X`. -/
+/-- Build the SDP encoding `target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ`
+for the chosen `mode`. The equality list `ps` may be empty (the
+ordinary Putinar case). Returns the CSDP problem, the σ-block specs,
+the equality cofactor specs (empty when `ps = []`), the monomial
+array, and (for `.lpSlack`) the 0-based index of the λ block in
+`Solution.X`.
+
+Equality cofactors. Each `qⱼ` is `Σ_b cⱼ_b · monomial_b` with `cⱼ_b`
+free in sign. Encode `cⱼ_b = x⁺ᵢ − x⁻ᵢ` and require `x⁺ ≥ 0`, `x⁻ ≥ 0`:
+two diagonal LP blocks of width `Σⱼ |basisⱼ|`. Trace cost gives these
+blocks zero weight — otherwise the objective drives `x⁺` and `x⁻` to
+infinity together. -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
-    (mode : SdpMode := .feasibility) :
-    LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) ×
-      Option Nat :=
-  let σBlocks := buildBlocks target gs
+    (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := []) :
+    LeanCsdp.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
+      Array (CMvMonomial n) × Option Nat :=
+  let σBlocks := buildBlocks target gs ps
+  let eqSpecs := buildEqCofactorSpecs target gs ps
+  let hasEqs := !ps.isEmpty
+  let cumOffsets : Array Nat := Id.run do
+    let mut offsets : Array Nat := #[]
+    let mut acc : Nat := 0
+    for spec in eqSpecs do
+      offsets := offsets.push acc
+      acc := acc + spec.size
+    return offsets
+  let totalCofactorWidth : Nat :=
+    eqSpecs.foldl (fun acc s => acc + s.size) 0
+  -- Block layout: [σ-blocks…, (x⁺, x⁻ if eqs), (λ if .lpSlack)].
+  let xPosBlockIdx : Nat := σBlocks.size
+  let xNegBlockIdx : Nat := σBlocks.size + 1
   let lambdaBlockIdx? : Option Nat :=
     match mode with
-    | .lpSlack => some σBlocks.size
+    | .lpSlack => some (σBlocks.size + (if hasEqs then 2 else 0))
     | _        => none
   let σBlockSizes := σBlocks.map fun b => Int32.ofNat b.size
+  let withEqsSizes : Array Int32 :=
+    if hasEqs then
+      σBlockSizes
+        |>.push (-(Int32.ofNat totalCofactorWidth))
+        |>.push (-(Int32.ofNat totalCofactorWidth))
+    else σBlockSizes
   let blockSizes : Array Int32 :=
     match mode with
-    | .lpSlack => σBlockSizes.push 1
-    | _        => σBlockSizes
+    | .lpSlack => withEqsSizes.push 1
+    | _        => withEqsSizes
   let constMono := zeroMono n
-  -- One pass: cache each blockProduct as its sparse support, accumulate
-  -- the monomial union, and build a (monomial → index) lookup. Both
-  -- the b-vector pass and the aTriples emission below consume `cached`
-  -- and `monoIndex`.
-  let (cached, monos, monoIndex) :
-      Array (CachedProduct n) × Array (CMvMonomial n) ×
+  -- One pass: cache σ-block and eq-cofactor products, accumulate the
+  -- monomial union, build a (monomial → index) lookup.
+  let (cached, cachedEq, monos, monoIndex) :
+      Array (CachedProduct n) × Array (CachedEqProduct n) ×
+        Array (CMvMonomial n) ×
         Std.TreeMap (CMvMonomial n) Nat compare :=
     Id.run do
       let mut monos : Array (CMvMonomial n) := #[]
       let mut monoIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
-      -- LP-slack always needs the constant-monomial equality (to attach
-      -- the `+1·λ` term to). Seed it first whether or not `target` has
-      -- a constant term. For feasibility, seed with target's monomials
-      -- so the b-vector lookup `target.coeff monos[i]` is non-trivial
-      -- for any monomial coming from `target`, even if no σ-product
-      -- introduces it.
       match mode with
       | .lpSlack =>
         monoIndex := monoIndex.insert constMono 0
@@ -273,15 +338,22 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
                   monoIndex := monoIndex.insert m monos.size
                   monos := monos.push m
             cached := cached.push { blockIdx, j, k, support }
-      return (cached, monos, monoIndex)
+      let mut cachedEq : Array (CachedEqProduct n) := #[]
+      for eqIdx in [0:eqSpecs.size] do
+        let spec := eqSpecs[eqIdx]!
+        for b in [0:spec.size] do
+          let prod := eqProduct spec b
+          let mut support : Array (CMvMonomial n × ℚ) := #[]
+          for m in prod.monomials do
+            let c := prod.coeff m
+            if c ≠ 0 then
+              support := support.push (m, c)
+              if !monoIndex.contains m then
+                monoIndex := monoIndex.insert m monos.size
+                monos := monos.push m
+          cachedEq := cachedEq.push { eqIdx, basisIdx := b, support }
+      return (cached, cachedEq, monos, monoIndex)
   let b : Array Float := monos.map fun m => ratToFloat (target.coeff m)
-  -- For each cached product (block, j, k), emit one ConstraintTriple
-  -- per non-zero monomial coefficient. CSDP's `op_a` doubles
-  -- off-diagonal sparse entries against symmetric `X`, so
-  -- `tr(A · X)` expands to `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ`. We want
-  -- `target.coef(m) = Σⱼ cⱼⱼ Mⱼⱼ + 2 Σⱼ<k cⱼₖ Mⱼₖ` where
-  -- `cⱼₖ = coef(m in zⱼ·zₖ·g_b)`, so we emit `Aⱼⱼ = cⱼⱼ`, `Aⱼₖ = cⱼₖ`
-  -- directly (no halving).
   let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
     let mut acc : Array LeanCsdp.ConstraintTriple := #[]
     for cp in cached do
@@ -293,6 +365,26 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
             row := UInt32.ofNat (cp.j + 1)
             col := UInt32.ofNat (cp.k + 1)
             value := ratToFloat c }
+    -- Cofactor LP: contribution `cⱼ_b · coef_m(monomial_b · pⱼ)` with
+    -- `cⱼ_b = x⁺[idx] − x⁻[idx]`, so emit two diagonal entries per
+    -- monomial: `+coef` on the x⁺ block, `−coef` on the x⁻ block.
+    for cp in cachedEq do
+      let idx : Nat := cumOffsets[cp.eqIdx]! + cp.basisIdx
+      for (m, c) in cp.support do
+        let monoIdx := monoIndex[m]!
+        let cFloat := ratToFloat c
+        acc := acc.push
+          { constraint := UInt32.ofNat (monoIdx + 1)
+            block := UInt32.ofNat (xPosBlockIdx + 1)
+            row := UInt32.ofNat (idx + 1)
+            col := UInt32.ofNat (idx + 1)
+            value := cFloat }
+        acc := acc.push
+          { constraint := UInt32.ofNat (monoIdx + 1)
+            block := UInt32.ofNat (xNegBlockIdx + 1)
+            row := UInt32.ofNat (idx + 1)
+            col := UInt32.ofNat (idx + 1)
+            value := -cFloat }
     -- LP-slack: append `+1·λ` on the constant-monomial equality.
     if let some lambdaBlockIdx := lambdaBlockIdx? then
       let constMonoIdx := monoIndex[constMono]!
@@ -301,7 +393,9 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
           block := UInt32.ofNat (lambdaBlockIdx + 1)
           row := 1, col := 1, value := 1.0 }
     return acc
-  -- Cost matrix: depends on mode. CSDP maximises `tr(C·X)`. See `SdpMode`.
+  -- Cost matrix: trace cost on σ-blocks only. The cofactor LP blocks
+  -- must have zero cost — `tr` would drive `x⁺` and `x⁻` to infinity
+  -- together. CSDP maximises `tr(C·X)`. See `SdpMode`.
   let cTriples : Array LeanCsdp.Triple :=
     match mode, lambdaBlockIdx? with
     | .feasibility true, _ => Id.run do
@@ -326,7 +420,7 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
       c := cTriples
       a := aTriples
       constantOffset := 0.0 }
-  (problem, σBlocks, monos, lambdaBlockIdx?)
+  (problem, σBlocks, eqSpecs, monos, lambdaBlockIdx?)
 
 /-! ### Denominator schedule for rational rounding -/
 
@@ -397,20 +491,39 @@ def basisAsPolys (basis : Array (CMvMonomial n)) :
     Array (CMvPolynomial n ℚ) :=
   basis.map (fun m => CMvPolynomial.monomial m (1 : ℚ))
 
+/-- Decode an equality cofactor from the diagonal LP blocks: for each
+basis monomial `m_b` of cofactor `j`, the coefficient is
+`x⁺[idx] − x⁻[idx]` where `idx = cumOffset[j] + b`. Returns the
+polynomial `qⱼ = Σ_b coef_b · m_b`. -/
+def decodeCofactorBlock (eqSpec : EqCofactorSpec n)
+    (xPosDiag : Array ℚ) (xNegDiag : Array ℚ) (offset : Nat) :
+    Option (CMvPolynomial n ℚ) := Id.run do
+  let mut q : CMvPolynomial n ℚ := CMvPolynomial.C 0
+  for b in [0:eqSpec.size] do
+    let some xp := xPosDiag[offset + b]? | return none
+    let some xn := xNegDiag[offset + b]? | return none
+    let coef := xp - xn
+    if coef ≠ 0 then
+      q := q + CMvPolynomial.monomial eqSpec.basis[b]! coef
+  return some q
+
 /-- Try one denominator: round Gram matrices, reconstruct via LDL,
-build a Certificate, check it. Returns `none` if any step fails. -/
+decode cofactors, build a Certificate, check it. Returns `none` if any
+step fails. -/
 def tryDenominator (gs : List (CMvPolynomial n ℚ))
-    (blocks : Array (BlockSpec n)) (sol : LeanCsdp.Solution) (denom : ℚ)
+    (ps : List (CMvPolynomial n ℚ))
+    (blocks : Array (BlockSpec n)) (eqSpecs : Array (EqCofactorSpec n))
+    (sol : LeanCsdp.Solution) (denom : ℚ)
     (goal : Goal n) : Option (Certificate n) := Id.run do
   let some Qs := decodeSolution sol denom | return none
-  if Qs.size ≠ blocks.size then return none
-  -- Reconstruct σ₀ from block 0.
+  let hasEqs := !ps.isEmpty
+  let expectedSize := blocks.size + (if hasEqs then 2 else 0)
+  if Qs.size ≠ expectedSize then return none
   let some block0 := blocks[0]? | return none
   let some Q0 := Qs[0]? | return none
   let some sigma0Squares :=
     LDL.reconstruct block0.size Q0 (basisAsPolys block0.basis)
     | return none
-  -- Reconstruct each σᵢ from block i+1.
   let mut sigmas : Array (SOSDecomp n) := Array.mkEmpty (blocks.size - 1)
   for blockIdx in [1:blocks.size] do
     let some block := blocks[blockIdx]? | return none
@@ -419,52 +532,59 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
       LDL.reconstruct block.size Q (basisAsPolys block.basis)
       | return none
     sigmas := sigmas.push { squares := sigmaSquares }
+  let mut eqCofs : List (CMvPolynomial n ℚ) := []
+  if hasEqs then
+    let some xPosDiag := Qs[blocks.size]? | return none
+    let some xNegDiag := Qs[blocks.size + 1]? | return none
+    let mut offset : Nat := 0
+    let mut acc : Array (CMvPolynomial n ℚ) := #[]
+    for spec in eqSpecs do
+      let some q := decodeCofactorBlock spec xPosDiag xNegDiag offset
+        | return none
+      acc := acc.push q
+      offset := offset + spec.size
+    eqCofs := acc.toList
   let cert : Certificate n :=
-    { sigma0 := { squares := sigma0Squares }, sigmas := sigmas.toList }
-  if cert.checks goal gs then return some cert
+    { sigma0 := { squares := sigma0Squares },
+      sigmas := sigmas.toList,
+      eqCofs := eqCofs }
+  if cert.checks goal gs ps then return some cert
   return none
 
 /-- Try a single SDP encoding (one choice of `useTraceCost`) and the
 denominator schedule. Returns `none` if CSDP fails or no rounding
 validates. -/
 private def tryOneSdp (target : CMvPolynomial n ℚ)
-    (gs : List (CMvPolynomial n ℚ)) (goal : Goal n)
-    (useTraceCost : Bool) : IO (Option (Certificate n)) := do
-  let (problem, blocks, _monos, _) := buildSdp target gs (.feasibility useTraceCost)
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
+    (goal : Goal n) (useTraceCost : Bool) : IO (Option (Certificate n)) := do
+  let (problem, blocks, eqSpecs, _monos, _) :=
+    buildSdp target gs (.feasibility useTraceCost) ps
   if problem.b.size = 0 then
     if target = 0 then
       return some { sigma0 := { squares := [] },
-                    sigmas := gs.map fun _ => { squares := [] } }
+                    sigmas := gs.map fun _ => { squares := [] },
+                    eqCofs := ps.map fun _ => CMvPolynomial.C 0 }
     else
       return none
   let sol := LeanCsdp.solve problem
-  -- CSDP return codes (from CSDP user manual Table 13.1): 0 = success,
-  -- 3 = problem solved to near optimality (still a usable rounding
-  -- target). Anything else (1 = primal infeasible, 2 = dual infeasible,
-  -- 4 = max iterations, 5 = stuck at edge of primal feasibility,
-  -- 6 = stuck at edge of dual feasibility, …) gives up on this
-  -- encoding.
   if sol.ret ∉ [0, 3] then
     return none
-  -- Try the polynomial's own denominator first: the true Gram matrix
-  -- entries are rationals whose denominators divide that of `target`'s
-  -- coefficients (plus the constraints in `gs`), so this is the natural
-  -- rounding grid. Falling back to `niceDenominators` covers cases
-  -- where the support doesn't determine a unique Gram or `target = 0`.
   let targetDenom : ℚ := (polyDenom target : ℚ)
   let constraintDenoms : List ℚ := gs.map fun g => (polyDenom g : ℚ)
+  let equalityDenoms : List ℚ := ps.map fun p => (polyDenom p : ℚ)
   let denomCandidates : List ℚ :=
-    targetDenom :: constraintDenoms ++ niceDenominators
+    targetDenom :: constraintDenoms ++ equalityDenoms ++ niceDenominators
   for d in denomCandidates do
-    if let some cert := tryDenominator gs blocks sol d goal then
+    if let some cert := tryDenominator gs ps blocks eqSpecs sol d goal then
       return some cert
   return none
 
 /-- Closed-positivity / infeasibility search: produce a Certificate
-proving `target = σ₀ + Σᵢ σᵢ · gᵢ` for the chosen `target`. -/
+proving `target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ` for the chosen `target`.
+The equality list `ps` may be empty. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
-    (gs : List (CMvPolynomial n ℚ)) (goal : Goal n) :
-    IO (Option (Certificate n)) := do
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
+    (goal : Goal n) : IO (Option (Certificate n)) := do
   -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
   -- HOL Light convention) but interacts badly with infeasibility
@@ -477,7 +597,7 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     | .infeasible => [false]
     | _           => [true, false]
   for useTraceCost in strategies do
-    if let some cert ← tryOneSdp target gs goal useTraceCost then
+    if let some cert ← tryOneSdp target gs ps goal useTraceCost then
       return some cert
   return none
 
@@ -519,9 +639,10 @@ below a clean power of two, we still try the natural largest `ε`.
 Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
 window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
-    (gs : List (CMvPolynomial n ℚ)) :
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := []) :
     IO (Option (StrictResult n)) := do
-  let (problem, _σBlocks, _monos, lambdaBlockIdx?) := buildSdp p gs .lpSlack
+  let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
+    buildSdp p gs .lpSlack ps
   let some lambdaBlockIdx := lambdaBlockIdx? | return none
   let sol := LeanCsdp.solve problem
   if sol.ret ∉ [0, 3] then return none
@@ -544,7 +665,7 @@ def runStrict (p : CMvPolynomial n ℚ)
     if hε : 0 < ε then
       let goal : Goal n := .strict p ε hε
       let targetPoly := p - CMvPolynomial.C ε
-      match (← runFeasibilitySearch targetPoly gs goal) with
+      match (← runFeasibilitySearch targetPoly gs ps goal) with
       | some cert => return some { cert, ε, hε }
       | none => pure ()
   return none
@@ -554,11 +675,12 @@ translation (`p` for `.closed`, `-1` for `.infeasible`). Strict
 positivity has its own entry point: `runStrict`; the `.strict` arm
 here is a defensive `none` for direct callers (the tactic surface
 routes `.strict` goals straight to `runStrict`). -/
-def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
+def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ))
+    (ps : List (CMvPolynomial n ℚ) := []) :
     IO (Option (Certificate n)) := do
   match goal with
-  | .closed p   => runFeasibilitySearch p gs goal
-  | .infeasible => runFeasibilitySearch (-1) gs goal
+  | .closed p   => runFeasibilitySearch p gs ps goal
+  | .infeasible => runFeasibilitySearch (-1) gs ps goal
   | .strict ..  => return none
 
 end SOS.Search

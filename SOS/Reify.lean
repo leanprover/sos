@@ -51,6 +51,10 @@ inductive ConstraintKind where
   /-- `h : 0 < origExpr`. Promoted to a `.nonneg` facet via
   `le_of_lt h` in the elaborator. -/
   | pos
+  /-- `h : a = b`. The reifier records `pTree := reify(a − b)` so the
+  certified equality is `aeval x pTree = 0`. The cofactor `qⱼ` enters
+  the certificate freely. -/
+  | eq
   deriving Inhabited, Repr, DecidableEq
 
 /-! ### Numeric-literal extraction -/
@@ -189,8 +193,9 @@ structure ConstraintInfo where
   kind : ConstraintKind
   fvar : FVarId
 
-/-- Reified conclusion: `raw` is the reified polynomial AST; `orig`
-is the original Expr needed by the bridge equation. -/
+/-- Reified conclusion: untyped polynomial AST plus the original
+ℝ-valued side of the user's `0 ≤ p` / `0 < p` goal. Bundled together
+because they're both present iff the conclusion isn't `False`. -/
 structure ParsedConcl where
   raw  : SOS.Poly.Raw
   orig : Lean.Expr
@@ -229,14 +234,13 @@ Each speculative intro is wrapped in `Tactic.saveState`; a deeper
 reify failure rolls the intros back. -/
 
 /-- Run `reifyRaw e` against `atoms`, returning `none` if it throws.
+Hoisted out of `recogniseConstraint` and `parseGoalAtomicAux` (where
+it used to be duplicated).
 
-`reifyRaw` itself doesn't throw on unrecognised shapes (those are
-opacified via `addAtom`); the only failures here are `Meta` errors
-(whnfR / isDefEq) that would propagate as elaboration exceptions.
-Swallowing those lets callers fall through gracefully when the
-hypothesis really isn't a polynomial-shaped constraint; the
-exception is logged under `trace.sos.reify` for when "best effort"
-hides a real bug. -/
+Failure is intentionally swallowed so that an unrecognised hypothesis
+just falls through (it might still be a valid local-context fact;
+the parser is supposed to be best-effort). The exception is logged
+under `trace.sos.reify` for when "best effort" hides a real bug. -/
 private def tryReify (e : Expr) (atoms : Array Expr) :
     Tactic.TacticM (Option (SOS.Poly.Raw × Array Expr)) := do
   try
@@ -270,6 +274,17 @@ def recogniseConstraint (h : Expr) (atoms : Array Expr) :
     unless r = 0 do return none
     let some (raw, atoms') ← tryReify b atoms | return none
     return some (.pos, raw, b, atoms')
+  | Eq α a b =>
+    -- Only ℝ-valued equalities count as constraints. Equalities at
+    -- other types are not in the supported fragment.
+    unless (← Meta.isDefEq α (Lean.mkConst ``Real)) do return none
+    -- Reify `a − b` so the certified equality is `aeval x pTree = 0`.
+    -- The `orig` field stores the difference `a − b`; downstream the
+    -- bridge proves `evalReal x pTree = a − b` and combines with
+    -- `h : a = b` (`sub_eq_zero_of_eq`) to get `a − b = 0`.
+    let abDiff ← Meta.mkAppM ``HSub.hSub #[a, b]
+    let some (raw, atoms') ← tryReify abDiff atoms | return none
+    return some (.eq, raw, abDiff, atoms')
   | _ => return none
 
 partial def parseGoalAtomicAux
