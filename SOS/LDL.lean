@@ -103,13 +103,14 @@ def isqrt (n : Nat) : Nat := Id.run do
 four-square theorem this exists for every `n : ℕ`; we brute-force search.
 
 We cap `n` at `1 <<< 20` to bound the worst-case `O(n^(3/2))` inner-loop
-work to a few seconds. The rounding loop in `runFeasibilitySearch`
-calls this on `target_pivot.num · target_pivot.den` per LDL diagonal;
-huge `num · den` happens when CSDP rounding noise produces tiny
-pivots at large schedule denominators (the rounded value is "real
-noise rounded to a fine grid", not a genuine SOS coefficient). Giving
-up on those rounding attempts is the right semantics — the next
-denominator in the schedule is what we want to try. -/
+work to a few seconds. The search loop calls this (via
+`fourSquaresRat` → `LDL.reconstruct`) on `target_pivot.num · target_pivot.den`
+per LDL diagonal; huge `num · den` happens when CSDP rounding noise
+produces tiny pivots at large schedule denominators (the rounded
+value is "real noise rounded to a fine grid", not a genuine SOS
+coefficient). Giving up on those rounding attempts is the right
+semantics — the next denominator in the schedule is what we want to
+try. -/
 def fourSquaresNat (n : Nat) : Option (Nat × Nat × Nat × Nat) := Id.run do
   if n > 1 <<< 20 then return none
   let m := isqrt n

@@ -25,8 +25,10 @@ closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
 * For each monomial `m` in the *union* of `support t ∪ support
   (z_b[j]·z_b[k]·g_b)`, one CSDP equality constraint:
     `coef_m(t) = Σ_b Σ_{j ≤ k} Q_b[j,k] · coef_m(z_b[j]·z_b[k]·g_b)`
-  with `g_0 = 1`. CSDP's symmetric `tr(A·X) = b` form uses upper-
-  triangle `A` with off-diagonal entries halved.
+  with `g_0 = 1`. We emit upper-triangle `A` entries `Aⱼₖ = coef_m(zⱼ·zₖ·g_b)`
+  directly (no halving): CSDP's `op_a` doubles off-diagonal sparse
+  entries against symmetric `X`, so `tr(A·X)` expands to
+  `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ` which matches the constraint above.
 * Cost matrix `C = 0` (feasibility).
 * Float Gram matrices come back in `Solution.X`. We round each to
   rationals over a denominator schedule, then verify the resulting
@@ -85,6 +87,8 @@ private partial def monomialsUpToAux (n : Nat) :
 
 /-- All monomials in `n` variables of total degree ≤ `d`, in
 deterministic order (lex with first coordinate varying fastest).
+For example, `monomialsUpTo 2 2` produces
+`#[(0,0), (1,0), (2,0), (0,1), (1,1), (0,2)]`.
 
 Cardinality is `C(n+d, d)` — recursion enumerates only valid
 compositions, avoiding the `(d+1)^n` blow-up of generate-then-filter
@@ -186,14 +190,15 @@ structure CachedProduct (n : Nat) where
 /-- Build the SDP feasibility problem for `target ≥ 0` over `gs`.
 
 `useTraceCost = true` populates the cost matrix `C` with the
-identity on every block (CSDP minimises `tr(X)`). This is Harrison's
-HOL Light convention and is required to make CSDP converge on
-near-rank-deficient SDPs (closed positivity / strict positivity).
-For infeasibility certificates the trace objective interacts badly
-with CSDP's homogeneous self-dual embedding (CSDP declares "dual
-infeasible" on what is otherwise a feasible problem); pass
-`useTraceCost = false` for that case to keep `C = 0` (pure
-feasibility). -/
+identity on every block, so CSDP maximises `tr(X)`. This is
+Harrison's HOL Light convention (the direction is empirically
+irrelevant — any nonzero objective regularises CSDP's interior-point
+search) and is required to make CSDP converge on near-rank-deficient
+SDPs (closed positivity / strict positivity). For infeasibility
+certificates the trace objective interacts badly with CSDP's
+homogeneous self-dual embedding (CSDP declares "dual infeasible" on
+what is otherwise a feasible problem); pass `useTraceCost = false`
+for that case to keep `C = 0` (pure feasibility). -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     (useTraceCost : Bool := true) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) :=
@@ -235,12 +240,12 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
       return (cached, monos, monoIndex)
   let b : Array Float := monos.map fun m => ratToFloat (target.coeff m)
   -- For each cached product (block, j, k), emit one ConstraintTriple
-  -- per non-zero monomial coefficient. CSDP mirrors the upper-triangle
-  -- of each `A_i` to the lower triangle and computes
-  -- `tr(A_i · X) = Σⱼₖ Aⱼₖ Xⱼₖ` on the resulting symmetric matrix; for
-  -- symmetric `X` that expands to `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ`. We
-  -- want `target.coef(m) = Σⱼ cⱼⱼ Mⱼⱼ + 2 Σⱼ<k cⱼₖ Mⱼₖ` where
-  -- `cⱼₖ = coef(m in zⱼ·zₖ·g_b)`, so `Aⱼⱼ = cⱼⱼ`, `Aⱼₖ = cⱼₖ`.
+  -- per non-zero monomial coefficient. CSDP's `op_a` doubles
+  -- off-diagonal sparse entries against symmetric `X`, so
+  -- `tr(A · X)` expands to `Σⱼ Aⱼⱼ Xⱼⱼ + 2 Σⱼ<k Aⱼₖ Xⱼₖ`. We want
+  -- `target.coef(m) = Σⱼ cⱼⱼ Mⱼⱼ + 2 Σⱼ<k cⱼₖ Mⱼₖ` where
+  -- `cⱼₖ = coef(m in zⱼ·zₖ·g_b)`, so we emit `Aⱼⱼ = cⱼⱼ`, `Aⱼₖ = cⱼₖ`
+  -- directly (no halving).
   let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
     let mut acc : Array LeanCsdp.ConstraintTriple := #[]
     for cp in cached do
@@ -261,7 +266,7 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
   -- Light SOS reports that an arbitrary objective improves rounding
   -- behaviour and may change CSDP's stopping criterion. The direction
   -- (max vs min) is empirically irrelevant for that regularisation
-  -- effect, but the sign here matches CSDP's convention.
+  -- effect.
   let cTriples : Array LeanCsdp.Triple :=
     if useTraceCost then Id.run do
       let mut acc : Array LeanCsdp.Triple := #[]
@@ -418,9 +423,10 @@ def decodeSolution (sol : LeanCsdp.Solution) (denom : ℚ) :
       let some block := decodeSdpBlock denom n entries | return none
       acc := acc.push block
     | .diag n entries =>
+      -- Defensive: the SDP builders use non-negative block sizes, so CSDP
+      -- never returns `.diag` blocks for this encoding. Handle them as
+      -- 1×1 sub-Grams in case the encoding changes.
       if entries.size ≠ n then return none
-      -- Diagonal block: extract just the n diagonal entries (each in its
-      -- own 1×1 sub-Gram in the upper-triangle convention).
       let mut diag : Array ℚ := #[]
       for i in [0:n] do
         diag := diag.push (niceRound denom (entries.get! i))
@@ -476,10 +482,12 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
     else
       return none
   let sol := LeanCsdp.solve problem
-  -- CSDP return codes (from CSDP user manual §7): 0 = optimal solution
-  -- found, 3 = stuck at edge of primal feasibility (still usually a
-  -- usable rounding target). Anything else (1 = infeasible, 2 = dual
-  -- infeasible, 4 = max iterations, …) gives up on this encoding.
+  -- CSDP return codes (from CSDP user manual Table 13.1): 0 = success,
+  -- 3 = problem solved to near optimality (still a usable rounding
+  -- target). Anything else (1 = primal infeasible, 2 = dual infeasible,
+  -- 4 = max iterations, 5 = stuck at edge of primal feasibility,
+  -- 6 = stuck at edge of dual feasibility, …) gives up on this
+  -- encoding.
   if sol.ret ∉ [0, 3] then
     return none
   -- Try the polynomial's own denominator first: the true Gram matrix
@@ -501,7 +509,7 @@ proving `target = σ₀ + Σᵢ σᵢ · gᵢ` for the chosen `target`. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (goal : Goal n) :
     IO (Option (Certificate n)) := do
-  -- Cost-matrix strategies, in order. Trace minimisation gives CSDP
+  -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
   -- HOL Light convention) but interacts badly with infeasibility
   -- certificates and with some basis choices that include the
@@ -535,7 +543,9 @@ structure StrictResult (n : Nat) where
   hε   : 0 < ε
 
 /-- Read `λ*` from the LP-slack solve. The λ block is a 1×1 PSD block,
-so its sole entry is the value we want. -/
+so its sole entry is the value we want. The `.diag` arm is defensive
+— the LP-slack builder uses a positive `1×1` block size, so CSDP
+returns `.sdp` here. -/
 private def readLambda (sol : LeanCsdp.Solution) (lambdaBlockIdx : Nat) :
     Float :=
   match sol.X[lambdaBlockIdx]? with
@@ -584,7 +594,9 @@ def runStrict (p : CMvPolynomial n ℚ)
 
 /-- Closed/infeasibility search dispatcher. Owns the `Goal → target`
 translation (`p` for `.closed`, `-1` for `.infeasible`). Strict
-positivity has its own entry point: `runStrict`. -/
+positivity has its own entry point: `runStrict`; the `.strict` arm
+here is a defensive `none` for direct callers (the tactic surface
+routes `.strict` goals straight to `runStrict`). -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
     IO (Option (Certificate n)) := do
   match goal with
