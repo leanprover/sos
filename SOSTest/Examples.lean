@@ -1,32 +1,10 @@
 /-
-Speed-test candidate set. Build target is wall-clock < 10s for the
+Speed-test candidate set. Build target is wall-clock < 60s for the
 whole file on the kim-em/sos main toolchain.
 -/
 import SOS
 
 open SOS CPoly
-
-/-! ### Pure invariant checks for search/round/reconstruct helpers -/
-
-#guard (SOS.Search.monomialsUpTo 2 2).size = 6
-#guard
-  match (SOS.Search.monomialsUpTo 2 2)[1]? with
-  | some m =>
-    let a := CMvMonomial.degreeOf m ⟨0, by decide⟩
-    let b := CMvMonomial.degreeOf m ⟨1, by decide⟩
-    a = 1 ∧ b = 0
-  | none => False
-
-#guard
-  match SOS.Search.decodeSdpBlock (1 : ℚ) 2 FloatArray.empty with
-  | none => true
-  | some _ => false
-
-#guard
-  match SOS.LDL.reconstruct 2 (#[] : Array ℚ)
-      (#[] : Array (CMvPolynomial 1 ℚ)) with
-  | none => true
-  | some _ => false
 
 -- 1. closed positivity, 1 var, deg 2
 example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
@@ -358,3 +336,29 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 --     (_hz1 : 0 ≤ z - 2) (_hz2 : 0 ≤ 4 - z) :
 --     0 ≤ 2*(x*z + x*y + y*z) - (x^2 + y^2 + z^2) - 12 := by sos
 
+/-! ### Pure invariant checks for search/round/reconstruct helpers
+
+These exercise internal helpers (`monomialsUpTo`, `decodeSdpBlock`,
+`LDL.reconstruct`) on degenerate inputs, so a refactor that
+mis-handles the empty / null case is caught here rather than only by
+the end-to-end `by sos` examples above. -/
+
+#guard (SOS.Search.monomialsUpTo 2 2).size = 6
+#guard
+  match (SOS.Search.monomialsUpTo 2 2)[1]? with
+  | some m =>
+    let a := CMvMonomial.degreeOf m ⟨0, by decide⟩
+    let b := CMvMonomial.degreeOf m ⟨1, by decide⟩
+    a = 1 ∧ b = 0
+  | none => False
+
+#guard
+  match SOS.Search.decodeSdpBlock (1 : ℚ) 2 FloatArray.empty with
+  | none => true
+  | some _ => false
+
+#guard
+  match SOS.LDL.reconstruct 2 (#[] : Array ℚ)
+      (#[] : Array (CMvPolynomial 1 ℚ)) with
+  | none => true
+  | some _ => false
