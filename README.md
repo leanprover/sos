@@ -94,6 +94,45 @@ Harrison's [TPHOLs 2007 paper]
   zero. Our `SOS.LDL.decompose` does this; `LDL.reconstruct` already
   drops the zero-D contributions.
 
+## Scope and limits
+
+- **Rational certificates only.** Witnesses live in
+  `CMvPolynomial n ℚ` throughout. CSDP returns floats, which we round
+  against a denominator schedule (small ints, then powers of two up to
+  `2^20`) and decompose via rational LDLᵀ + Lagrange four-square.
+  There is no support for algebraic-extension coefficients — a goal
+  whose only SOS witness involves `√2` (or any other irrational) is
+  out of reach by construction.
+
+- **Putinar form, with hypotheses as multipliers.** A certificate is
+  `target = σ₀ + Σᵢ σᵢ · gᵢ` with each `σᵢ` an SOS, where the `gᵢ`
+  are non-negativity hypotheses pulled from `intro`-binders and the
+  local context. Recognised constraint shapes are `0 ≤ g`, `g ≤ 0`
+  (encoded as `0 ≤ −g`), and `0 < g` (used via `le_of_lt`).
+  Unconstrained goals reduce to `target = σ₀`. Strict positivity
+  `0 < p` is handled by an ε-schedule (`[1, 1/2, ..., 1/512]`) that
+  searches for a witness for `p − ε ≥ 0`; the proper LP-slack-
+  maximisation encoding from Harrison's plan is not implemented.
+  Infeasibility uses `target = −1`.
+
+- **Single fixed relaxation level.** Multiplier basis sizes are set
+  once from a degree bound `D = max(deg(target), maxᵢ deg(gᵢ))`: the
+  σ₀ basis is monomials up to `⌈D/2⌉`, and each σᵢ basis is monomials
+  up to `⌈max(0, D − deg(gᵢ))/2⌉`. There is no hierarchy walk that
+  bumps the relaxation order on failure. Failures cover both
+  genuinely non-SOS non-negative polynomials (Motzkin
+  `x⁴y² + x²y⁴ + 1 − 3x²y²` is the canonical example) and goals that
+  would only succeed at a larger relaxation order than this fixed
+  search uses.
+
+- **Search failure is not a soundness failure.** When CSDP returns an
+  unusable status, when no rounding denominator validates, or when
+  LDLᵀ / four-square reconstruction can't close the certificate,
+  `by sos` reports "no certificate found" and leaves the goal open.
+  The `Certificate.checks` predicate that closes the goal is
+  `cbv_decide`-checked against `Certificate n` data, so a proof that
+  goes through is independent of CSDP correctness.
+
 ## Building and testing
 
 ```
