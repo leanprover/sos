@@ -184,10 +184,11 @@ private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
   return accProof
 
 /-- Discharge the `cert.checks goal gs = true` side condition by
-`with_unfolding_all decide`. The polynomial equality reduces only with
-the `Lawful` substrate fully unfolded. -/
+`decide +kernel`. Kernel reduction handles `Std.ExtTreeMap` lookups
+and rational arithmetic at the witness denominators the search
+actually emits. -/
 private def buildDecideTrue (type : Expr) : TacticM Expr := do
-  let tac ← `(tactic| (with_unfolding_all decide))
+  let tac ← `(tactic| (decide +kernel))
   proveByTactic type tac
 
 /-! ### Per-hypothesis bridged proofs

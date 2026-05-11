@@ -6,8 +6,8 @@ Rational LDLᵀ decomposition and Lagrange four-square decomposition.
 
 These are pure executable algorithms. Their *output* is verified
 downstream (the certificate's polynomial identity is checked by
-`cbv_decide` against `Certificate.checks`); no Lean-side correctness
-proofs are needed at this layer. If LDL fails (matrix is not strictly
+`decide +kernel` against `Certificate.checks`); no Lean-side
+correctness proofs are needed at this layer. If LDL fails (matrix is not strictly
 PSD on its diagonal pivots) or the four-square search fails, we
 return `none` and the search loop tries the next denominator.
 -/

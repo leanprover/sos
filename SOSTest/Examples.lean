@@ -92,18 +92,26 @@ example : True := by
     (have : ∀ x y : ℝ, 0 ≤ x^4*y^2 + x^2*y^4 + 1 - 3*x^2*y^2 := by sos)
   trivial
 
-/-! ### Strict positivity with tight bounds
+/-! ### Strict positivity with tight or unfriendly bounds
 
 LP-slack discovers `λ*` and descends through `ε = 2^-k` from there.
-Power-of-two denominators keep the LDL/four-squares residual clean. -/
+Including `polyDenom target` in the rounding schedule lets residuals
+with non-power-of-two denominators land on the natural rational grid,
+and `decide +kernel` verifies the certificate. -/
 
--- 19. tight strict positivity, single-var
-example (x : ℝ) : 0 < x^2 + 1/2048 := by sos
+-- 19. non-power-of-two denominator (the residual ends up at denom 3200
+-- after ε = 1/128 against `1/100`, requiring polyDenom-aware rounding).
+example (x : ℝ) : 0 < x^2 + 1/100 := by sos
 
--- 20. tight strict positivity, multivariate
-example (x y : ℝ) : 0 < x^2 + y^2 + 1/1024 := by sos
+-- 20. multivariate, non-power-of-two denominator
+example (x y : ℝ) : 0 < x^2 + y^2 + 1/500 := by sos
 
--- 21. infimum-0 strict positivity must fail gracefully.
+-- 21. tight strict positivity at the four-squares cap. `fourSquaresNat`
+-- caps at `n ≤ 2^20`, which puts a floor of `ε ≥ 1/(2^20)` on what we
+-- can certify by this pipeline.
+example (x : ℝ) : 0 < x^2 + 1/1048576 := by sos
+
+-- 22. infimum-0 strict positivity must fail gracefully.
 -- p = (x*y − 1)² + x² is strictly positive everywhere on ℝ² (would need
 -- x*y = 1 and x = 0 simultaneously) but its infimum is 0 along x → 0,
 -- y = 1/x. No positive ε admits a Putinar certificate.

@@ -132,8 +132,15 @@ Harrison's [TPHOLs 2007 paper]
   LDLᵀ / four-square reconstruction can't close the certificate,
   `by sos` reports "no certificate found" and leaves the goal open.
   The `Certificate.checks` predicate that closes the goal is
-  `cbv_decide`-checked against `Certificate n` data, so a proof that
-  goes through is independent of CSDP correctness.
+  `decide +kernel`-checked against `Certificate n` data, so a proof
+  that goes through is independent of CSDP correctness.
+
+- **The four-squares cap is the practical floor on `ε`.** Strict
+  positivity bounds smaller than `1/2^20 ≈ 10^-6` are out of reach
+  because `fourSquaresNat` brute-forces a Lagrange decomposition with
+  a cap at `n ≤ 2^20`. Lifting this requires a smarter four-squares
+  algorithm (e.g. Cornacchia / Pollard-style randomised search),
+  which is independent work.
 
 ## Building and testing
 

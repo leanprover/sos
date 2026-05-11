@@ -72,7 +72,7 @@ def Certificate.toPoly {n : Nat} (c : Certificate n)
 
 /-- Certificate validity check. We rely on CompPoly's
 `Lawful.instDecidableEq` (automatic for `ℚ` coefficients) to make
-polynomial equality decidable and `cbv_decide`-friendly. -/
+polynomial equality kernel-checkable via `decide +kernel`. -/
 def Certificate.checks {n : Nat} (c : Certificate n) (goal : Goal n)
     (gs : List (CMvPolynomial n ℚ)) : Bool :=
   (c.sigmas.length == gs.length) &&
