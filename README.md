@@ -171,7 +171,7 @@ The tactic runs three stages on a `by sos` goal:
 | `SOS.Certificate` | `Goal n`, `SOSDecomp`, `Certificate n`, `checks` predicate. |
 | `SOS.Verifier` | `sos_sound`, `sos_strict_sound`, `sos_infeasible_sound`, plus `aeval_*` and `evalReal_eq_aeval` bridge lemmas. |
 | `SOS.LDL` | Rational LDLᵀ, Lagrange 4-square, Gram→SOS reconstruction. |
-| `SOS.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop, ε-schedule for strict positivity. |
+| `SOS.Search` | Putinar-form SDP encoding, CSDP integration, rounding loop, LP-slack strict positivity. |
 | `SOS.Reify` | Atom-collecting Lean-`Expr` walker → `ParsedGoal` (atom array, untyped `SOS.Poly.Raw` for conclusion + constraints, hypothesis FVars). |
 | `SOS.Tactic` | `by sos` (search-driven) and `by sos_witness <cert>` elaborators. |
 | `SOSTest.Examples` | Worked examples invoking the tactic; serves as the `lake test` driver. |

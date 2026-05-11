@@ -7,9 +7,9 @@ rounding of the float Gram-matrix solution, and the top-level
 `runSearch` driver.
 
 Closed positivity and infeasibility go through the feasibility SDP
-(`runFeasibilitySearch`); strict positivity reuses it via an ε-schedule
-(`runStrictSearch`). The proper LP-slack-maximisation encoding for
-strict goals is not implemented.
+(`runFeasibilitySearch`); strict positivity goes through `runStrict`,
+which adds a slack variable to the SDP (`buildSdpStrict`), reads back
+`λ*` from CSDP, and re-solves `p − ε ≥ 0` for `ε = 2^-k` near `λ*`.
 
 **Encoding (Putinar form).** For a target polynomial `t` (= `p` for
 closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
@@ -41,6 +41,16 @@ namespace SOS.Search
 open CPoly
 
 variable {n : Nat}
+
+/-! ### Polynomial denominator -/
+
+/-- The least common multiple of the denominators of all (non-zero)
+coefficients of `p`. The true Gram matrix realising `σ = zᵀ Q z = p`
+has rational entries whose denominators divide this; using it as a
+rounding grid lets the rounder land on the exact rational matrix
+when CSDP returns a near-true float solution. -/
+def polyDenom {n : Nat} (p : CMvPolynomial n ℚ) : Nat :=
+  p.monomials.foldl (fun acc m => Nat.lcm acc (p.coeff m).den) 1
 
 /-! ### Monomial-basis enumeration -/
 
@@ -77,8 +87,8 @@ private partial def monomialsUpToAux (n : Nat) :
 deterministic order (lex with first coordinate varying fastest).
 
 Cardinality is `C(n+d, d)` — recursion enumerates only valid
-compositions, in contrast to the previous `(d+1)^n`-then-filter
-approach that exploded with moderate variable counts. -/
+compositions, avoiding the `(d+1)^n` blow-up of generate-then-filter
+at moderate variable counts. -/
 def monomialsUpTo (n d : Nat) : Array (CMvMonomial n) :=
   monomialsUpToAux n n d #[] (by simp) #[]
 
@@ -243,14 +253,15 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
             col := UInt32.ofNat (cp.k + 1)
             value := ratToFloat c }
     return acc
-  -- Cost matrix: minimise `tr(X) = Σ_b Σ_j M_b[j,j]`. CSDP minimises
+  -- Cost matrix: maximise `tr(X) = Σ_b Σ_j M_b[j,j]`. CSDP maximises
   -- `tr(C·X)`, so populating `c` with `(b, j, j, 1.0)` for every block
-  -- diagonal position expresses `min tr(X)`. Pure feasibility (`c = []`)
+  -- diagonal position expresses `max tr(X)`. Pure feasibility (`c = []`)
   -- leaves CSDP's primal objective at 0 and gives no preferred direction
   -- when the feasible set is a single boundary point; Harrison's HOL
   -- Light SOS reports that an arbitrary objective improves rounding
-  -- behaviour and may change CSDP's stopping criterion. This is an
-  -- empirical knob, not a principled cure for boundary feasibility.
+  -- behaviour and may change CSDP's stopping criterion. The direction
+  -- (max vs min) is empirically irrelevant for that regularisation
+  -- effect, but the sign here matches CSDP's convention.
   let cTriples : Array LeanCsdp.Triple :=
     if useTraceCost then Id.run do
       let mut acc : Array LeanCsdp.Triple := #[]
@@ -471,7 +482,16 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
   -- infeasible, 4 = max iterations, …) gives up on this encoding.
   if sol.ret ∉ [0, 3] then
     return none
-  for d in niceDenominators do
+  -- Try the polynomial's own denominator first: the true Gram matrix
+  -- entries are rationals whose denominators divide that of `target`'s
+  -- coefficients (plus the constraints in `gs`), so this is the natural
+  -- rounding grid. Falling back to `niceDenominators` covers cases
+  -- where the support doesn't determine a unique Gram or `target = 0`.
+  let targetDenom : ℚ := (polyDenom target : ℚ)
+  let constraintDenoms : List ℚ := gs.map fun g => (polyDenom g : ℚ)
+  let denomCandidates : List ℚ :=
+    targetDenom :: constraintDenoms ++ niceDenominators
+  for d in denomCandidates do
     if let some cert := tryDenominator gs blocks sol d goal then
       return some cert
   return none

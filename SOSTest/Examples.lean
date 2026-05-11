@@ -92,18 +92,15 @@ example : True := by
     (have : ∀ x y : ℝ, 0 ≤ x^4*y^2 + x^2*y^4 + 1 - 3*x^2*y^2 := by sos)
   trivial
 
-/-! ### LP-slack strict positivity, beyond the old fixed schedule
+/-! ### Strict positivity with tight bounds
 
-Polynomials whose strict-positivity bound `inf p > 0` is small enough
-that the previous `[1, 1/2, ..., 1/512]` schedule could not reach it.
-LP-slack discovers `λ*` and starts the descent at a `2^-k` near it. -/
+LP-slack discovers `λ*` and descends through `ε = 2^-k` from there.
+Power-of-two denominators keep the LDL/four-squares residual clean. -/
 
--- 19. tight strict positivity, power-of-two offset (clean residuals).
--- Smallest old-schedule entry was 1/512 ≈ 1.95e-3, so 1/2048 ≈ 4.88e-4
--- is genuinely beyond the old reach.
+-- 19. tight strict positivity, single-var
 example (x : ℝ) : 0 < x^2 + 1/2048 := by sos
 
--- 20. tight strict positivity, multivariate, power-of-two offset.
+-- 20. tight strict positivity, multivariate
 example (x y : ℝ) : 0 < x^2 + y^2 + 1/1024 := by sos
 
 -- 21. infimum-0 strict positivity must fail gracefully.
