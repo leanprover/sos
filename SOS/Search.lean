@@ -272,6 +272,90 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
       constantOffset := 0.0 }
   (problem, blocks, monos)
 
+/-! ### LP-slack strict-positivity SDP
+
+For `0 < p` over constraints `gᵢ ≥ 0`, encode `λ` as a decision variable
+in a 1×1 PSD block (so `λ ≥ 0`) and ask CSDP to maximise it. The
+constant-monomial equality picks up a `+1 · λ` term:
+
+* For `m = 1`: `coef₁(p) = (σ-stuff at constant) + λ`,
+  i.e. `σ-stuff[const] = coef₁(p) − λ`.
+* For `m ≠ 1`: unchanged from `buildSdp`.
+
+CSDP maximises `tr(C·X)`; cost = `+1.0` on the λ-block diagonal.
+Returns the SDP problem, the σ-block specs (without the λ block), the
+monomial array, and the 0-based index of the λ block in `Solution.X`. -/
+def buildSdpStrict (p : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ)) :
+    LeanCsdp.Problem × Array (BlockSpec n) × Array (CMvMonomial n) × Nat :=
+  let σBlocks := buildBlocks p gs
+  let lambdaBlockIdx : Nat := σBlocks.size
+  let blockSizes : Array Int32 :=
+    (σBlocks.map fun b => Int32.ofNat b.size).push 1
+  let constMono := zeroMono n
+  let (cached, monos, monoIndex) :
+      Array (CachedProduct n) × Array (CMvMonomial n) ×
+        Std.TreeMap (CMvMonomial n) Nat compare :=
+    Id.run do
+      let mut monos : Array (CMvMonomial n) := #[]
+      let mut monoIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
+      -- LP-slack always needs the constant-monomial equality (to attach
+      -- the −λ term to). Seed it first whether or not `p` has a constant
+      -- term.
+      monoIndex := monoIndex.insert constMono 0
+      monos := monos.push constMono
+      for m in p.monomials do
+        if !monoIndex.contains m then
+          monoIndex := monoIndex.insert m monos.size
+          monos := monos.push m
+      let mut cached : Array (CachedProduct n) := #[]
+      for blockIdx in [0:σBlocks.size] do
+        let block := σBlocks[blockIdx]!
+        let bsize := block.size
+        for j in [0:bsize] do
+          for k in [j:bsize] do
+            let prod := blockProduct block j k
+            let mut support : Array (CMvMonomial n × ℚ) := #[]
+            for m in prod.monomials do
+              let c := prod.coeff m
+              if c ≠ 0 then
+                support := support.push (m, c)
+                if !monoIndex.contains m then
+                  monoIndex := monoIndex.insert m monos.size
+                  monos := monos.push m
+            cached := cached.push { blockIdx, j, k, support }
+      return (cached, monos, monoIndex)
+  let b : Array Float := monos.map fun m => ratToFloat (p.coeff m)
+  let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
+    let mut acc : Array LeanCsdp.ConstraintTriple := #[]
+    for cp in cached do
+      for (m, c) in cp.support do
+        let monoIdx := monoIndex[m]!
+        acc := acc.push
+          { constraint := UInt32.ofNat (monoIdx + 1)
+            block := UInt32.ofNat (cp.blockIdx + 1)
+            row := UInt32.ofNat (cp.j + 1)
+            col := UInt32.ofNat (cp.k + 1)
+            value := ratToFloat c }
+    -- LP-slack: append `+1·λ` on the constant-monomial equality.
+    let constMonoIdx := monoIndex[constMono]!
+    acc := acc.push
+      { constraint := UInt32.ofNat (constMonoIdx + 1)
+        block := UInt32.ofNat (lambdaBlockIdx + 1)
+        row := 1, col := 1, value := 1.0 }
+    return acc
+  -- Cost: `+1.0` on the λ-block diagonal. CSDP maximises `tr(C·X)`,
+  -- so this maximises λ.
+  let cTriples : Array LeanCsdp.Triple := #[
+    { block := UInt32.ofNat (lambdaBlockIdx + 1), row := 1, col := 1,
+      value := 1.0 }]
+  let problem : LeanCsdp.Problem :=
+    { blockSizes := blockSizes
+      b := b
+      c := cTriples
+      a := aTriples
+      constantOffset := 0.0 }
+  (problem, σBlocks, monos, lambdaBlockIdx)
+
 /-! ### Denominator schedule for rational rounding -/
 
 /-- Schedule of denominators tried by the rational rounder, adapted from
@@ -413,19 +497,16 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
       return some cert
   return none
 
-/-! ### Strict positivity via ε-schedule
+/-! ### Strict positivity via LP-slack maximisation
 
-The proper LP-slack-maximisation encoding (one extra LP block with a
-slack variable λ, optimising `-λ`) lives in the original Harrison
-plan. The schedule below exchanges optimality for simplicity: we try
-a list of progressively smaller positive rationals `ε`, calling
-`runFeasibilitySearch` on `p - ε` for each, and stop at the first ε
-that yields a valid certificate. -/
-
-/-- Rationals tried in order when searching for a strict-positivity
-witness. -/
-def strictEpsSchedule : List ℚ :=
-  [1, 1/2, 1/4, 1/8, 1/16, 1/32, 1/64, 1/128, 1/256, 1/512]
+For `0 < p` over constraints `gᵢ ≥ 0`, encode `λ` as a decision
+variable in `buildSdpStrict` and let CSDP discover the largest `λ*`
+for which `p − λ` admits a Putinar certificate at the chosen
+relaxation level. Then re-solve `p − ε ≥ 0` with a rational
+`ε ∈ (0, λ*)` to obtain a verifiable certificate. The two-stage
+design avoids trying to round the σ-block Gram matrices from the LP
+solve directly: the witnesses for `p − λ*` won't generally round to
+witnesses for `p − ε`, so a clean re-solve is more robust. -/
 
 /-- Strict-positivity certificate output bundle. -/
 structure StrictResult (n : Nat) where
@@ -433,23 +514,57 @@ structure StrictResult (n : Nat) where
   ε    : ℚ
   hε   : 0 < ε
 
-/-- Search for a strict-positivity certificate by trying each ε in
-`strictEpsSchedule`. -/
-def runStrictSearch (p : CMvPolynomial n ℚ)
+/-- Read `λ*` from the LP-slack solve. The λ block is a 1×1 PSD block,
+so its sole entry is the value we want. -/
+private def readLambda (sol : LeanCsdp.Solution) (lambdaBlockIdx : Nat) :
+    Float :=
+  match sol.X[lambdaBlockIdx]? with
+  | some (.sdp _ entries) => if entries.size > 0 then entries.get! 0 else 0.0
+  | some (.diag _ entries) => if entries.size > 0 then entries.get! 0 else 0.0
+  | none => 0.0
+
+/-- Strict-positivity search via LP-slack maximisation. CSDP discovers
+`λ*`, the largest slack admissible at this relaxation level. We then
+try `ε = 2^-k` for `k` chosen so that `2^-k ≲ λ*`, descending until a
+candidate certifies. Powers-of-two denominators keep the residual
+`p − ε` clean for the LDL + four-squares pipeline. The factor-2 slack
+on `λ*` accounts for CSDP imprecision — when `λ*` is reported just
+below a clean power of two, we still try the natural largest `ε`.
+Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
+window admits a verifiable certificate. -/
+def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) :
     IO (Option (StrictResult n)) := do
-  for ε in strictEpsSchedule do
+  let (problem, _σBlocks, _monos, lambdaBlockIdx) := buildSdpStrict p gs
+  let sol := LeanCsdp.solve problem
+  if sol.ret ∉ [0, 3] then return none
+  let lambdaStar := readLambda sol lambdaBlockIdx
+  if lambdaStar ≤ 0.000000001 then return none
+  -- Find the smallest k such that 2^-k ≤ 2·λ*. The factor-2 slack
+  -- means CSDP returning `λ* = 0.999...` for a true optimum of 1
+  -- still starts at k = 0 (ε = 1).
+  let mut bound : Float := 1.0
+  let mut k : Nat := 0
+  while bound > 2.0 * lambdaStar do
+    bound := bound * 0.5
+    k := k + 1
+    if k > 25 then return none
+  -- Try ε = 2^-k, 2^-(k+1), ..., 2^-(k+7). Each is a power-of-two
+  -- denominator; the first that closes wins.
+  for j in [0:8] do
+    let denom : Nat := 2 ^ (k + j)
+    let ε : ℚ := 1 / (denom : ℚ)
     if hε : 0 < ε then
       let goal : Goal n := .strict p ε hε
-      let target := p - CMvPolynomial.C ε
-      match (← runFeasibilitySearch target gs goal) with
+      let targetPoly := p - CMvPolynomial.C ε
+      match (← runFeasibilitySearch targetPoly gs goal) with
       | some cert => return some { cert, ε, hε }
       | none => pure ()
   return none
 
 /-- Closed/infeasibility search dispatcher. Owns the `Goal → target`
 translation (`p` for `.closed`, `-1` for `.infeasible`). Strict
-positivity has its own entry point: `runStrictSearch`. -/
+positivity has its own entry point: `runStrict`. -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ)) :
     IO (Option (Certificate n)) := do
   match goal with

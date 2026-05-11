@@ -110,9 +110,11 @@ Harrison's [TPHOLs 2007 paper]
   local context. Recognised constraint shapes are `0 ≤ g`, `g ≤ 0`
   (encoded as `0 ≤ −g`), and `0 < g` (used via `le_of_lt`).
   Unconstrained goals reduce to `target = σ₀`. Strict positivity
-  `0 < p` is handled by an ε-schedule (`[1, 1/2, ..., 1/512]`) that
-  searches for a witness for `p − ε ≥ 0`; the proper LP-slack-
-  maximisation encoding from Harrison's plan is not implemented.
+  `0 < p` is handled by an LP-slack maximisation: one extra
+  decision variable `λ ≥ 0` enters the SDP via the constant-monomial
+  equality, CSDP maximises it to discover the largest admissible
+  slack `λ*`, and then `ε = 2^-k` near `λ*` is fed to the standard
+  feasibility pipeline to produce the verifiable certificate.
   Infeasibility uses `target = −1`.
 
 - **Single fixed relaxation level.** Multiplier basis sizes are set

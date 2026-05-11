@@ -92,6 +92,29 @@ example : True := by
     (have : ∀ x y : ℝ, 0 ≤ x^4*y^2 + x^2*y^4 + 1 - 3*x^2*y^2 := by sos)
   trivial
 
+/-! ### LP-slack strict positivity, beyond the old fixed schedule
+
+Polynomials whose strict-positivity bound `inf p > 0` is small enough
+that the previous `[1, 1/2, ..., 1/512]` schedule could not reach it.
+LP-slack discovers `λ*` and starts the descent at a `2^-k` near it. -/
+
+-- 19. tight strict positivity, power-of-two offset (clean residuals).
+-- Smallest old-schedule entry was 1/512 ≈ 1.95e-3, so 1/2048 ≈ 4.88e-4
+-- is genuinely beyond the old reach.
+example (x : ℝ) : 0 < x^2 + 1/2048 := by sos
+
+-- 20. tight strict positivity, multivariate, power-of-two offset.
+example (x y : ℝ) : 0 < x^2 + y^2 + 1/1024 := by sos
+
+-- 21. infimum-0 strict positivity must fail gracefully.
+-- p = (x*y − 1)² + x² is strictly positive everywhere on ℝ² (would need
+-- x*y = 1 and x = 0 simultaneously) but its infimum is 0 along x → 0,
+-- y = 1/x. No positive ε admits a Putinar certificate.
+example : True := by
+  fail_if_success
+    (have : ∀ x y : ℝ, 0 < (x*y - 1)^2 + x^2 := by sos)
+  trivial
+
 /-! ### `sos?` produces a `Try this:` suggestion of `sos_witness …` -/
 
 /--

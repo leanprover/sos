@@ -487,7 +487,7 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
-    match (← (SOS.Search.runStrictSearch p.tree.toCMv gsCMv : IO _)) with
+    match (← (SOS.Search.runStrict p.tree.toCMv gsCMv : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε
