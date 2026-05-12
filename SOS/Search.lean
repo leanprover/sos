@@ -37,6 +37,7 @@ closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
 -/
 import SOS.Certificate
 import SOS.LDL
+import SOS.RatSimplex
 import LeanCsdp
 
 namespace SOS.Search
@@ -124,6 +125,107 @@ def supportDominanceBasis (target : CMvPolynomial n ℚ) (deg : Nat) :
   if targetMonos.isEmpty then #[]
   else (monomialsUpTo n deg).filter (fun m => supportDominated n m targetMonos)
 
+/-! ### Half-Newton-polytope membership
+
+Reznick's theorem: if `target = Σⱼ qⱼ²`, every monomial appearing in
+any `qⱼ` has exponent `α` with `2·α ∈ Newton(target)`. So the
+`σ₀` basis is contained in `{m : 2·exp(m) ∈ Newton(target)}`. The
+membership test is an LP:
+
+  `∃ λ ≥ 0 : Σᵢ λᵢ = 1, Σᵢ λᵢ · exp(mᵢ) = 2·exp(m)`
+
+where `m₁, …, mₖ` are the support exponents of `target`. We solve
+this exactly in `ℚ` via `RatSimplex` — float-based solvers cannot
+soundly decide `λᵢ ≥ 0`. -/
+
+/-- Per-coordinate max exponent across the support. Any point in
+`Newton(target)` is componentwise `≤` this vector, so `2·exp(m)`
+exceeding it in any coordinate is a sound cheap rejection. -/
+private def coordwiseMaxSupportExp (n : Nat)
+    (targetMonos : Array (CMvMonomial n)) : Array Nat := Id.run do
+  let mut maxExp : Array Nat := Array.replicate n 0
+  for m in targetMonos do
+    for i in [0:n] do
+      if m[i]! > maxExp[i]! then maxExp := maxExp.set! i m[i]!
+  return maxExp
+
+/-- Half-Newton-polytope membership: does `2·exp(m)` lie in the
+convex hull of `{exp(m') : m' ∈ support(target)}`?
+
+Two layers, cheapest first:
+1. **Coordwise max rejection.** If `2·m[i]` exceeds the per-coordinate
+   max support exponent for any `i`, reject. Sound for any point in
+   the convex hull.
+2. **Exact LP feasibility.** Otherwise, solve the membership LP via
+   Phase-1 simplex over `ℚ`.
+
+Empty support means `target = 0`; we conservatively return `false`
+(no σ₀ basis monomial admissible). -/
+def isInHalfNewton (target : CMvPolynomial n ℚ) (m : CMvMonomial n) :
+    Bool := Id.run do
+  let targetMonos : Array (CMvMonomial n) := target.monomials.toArray
+  if targetMonos.isEmpty then return false
+  let maxExp := coordwiseMaxSupportExp n targetMonos
+  for i in [0:n] do
+    if 2 * m[i]! > maxExp[i]! then return false
+  -- Build the equality LP `A λ = b`, λ ≥ 0:
+  --   row 0 (normalisation):  Σ λᵢ = 1
+  --   row j+1 (var j):         Σ λᵢ · mᵢ[j] = 2·m[j]
+  let k := targetMonos.size
+  let mut A : Array (Array ℚ) := Array.mkEmpty (n + 1)
+  let mut b : Array ℚ := Array.mkEmpty (n + 1)
+  let mut normRow : Array ℚ := Array.mkEmpty k
+  for _ in [0:k] do normRow := normRow.push 1
+  A := A.push normRow
+  b := b.push 1
+  for j in [0:n] do
+    let mut row : Array ℚ := Array.mkEmpty k
+    for i in [0:k] do
+      let e : Nat := (targetMonos[i]!)[j]!
+      row := row.push (e : ℚ)
+    A := A.push row
+    let bj : Nat := 2 * m[j]!
+    b := b.push (bj : ℚ)
+  return RatSimplex.isFeasibleEqLP A b
+
+/-- Half-Newton-polytope basis for σ₀: those monomials `m` with
+`totalDegree m ≤ deg` such that `2·exp(m) ∈ Newton(target)`.
+
+This is Reznick's tightest necessary condition: any monomial that can
+appear in any `qⱼ` of `target = Σⱼ qⱼ²` lies in this set. It is
+**not** comparable to `supportDominanceBasis` — each admits monomials
+the other rejects. Newton is the principled (sound) of the two. -/
+def newtonBasis (target : CMvPolynomial n ℚ) (deg : Nat) :
+    Array (CMvMonomial n) :=
+  if target.monomials.isEmpty then #[]
+  else (monomialsUpTo n deg).filter (fun m => isInHalfNewton target m)
+
+/-- Basis-selection strategy for the σ₀ block.
+
+* `.dense` — `monomialsUpTo n σ₀BasisDeg`. Complete; the safety net.
+* `.dominance` — `supportDominanceBasis`. The cheap heuristic from
+  #17. Strictly aggressive — can exclude monomials Newton would
+  admit. Kept for benchmarking / debugging.
+* `.newton` — `newtonBasis`. Reznick's half-Newton-polytope. The
+  principled, sound pruning. -/
+inductive BasisStrategy where
+  | dense
+  | dominance
+  | newton
+  deriving Inhabited, DecidableEq, Repr
+
+namespace BasisStrategy
+
+/-- Compute the σ₀ basis at the given degree under this strategy. -/
+def basisAt (s : BasisStrategy) (target : CMvPolynomial n ℚ)
+    (deg : Nat) : Array (CMvMonomial n) :=
+  match s with
+  | .dense => monomialsUpTo n deg
+  | .dominance => supportDominanceBasis target deg
+  | .newton => newtonBasis target deg
+
+end BasisStrategy
+
 /-! ### Multiplier basis sizing -/
 
 /-- Half-ceiling: `⌈d/2⌉`. -/
@@ -179,15 +281,16 @@ basis degree and to every σᵢ multiplier basis degree, growing each
 Gram matrix accordingly. `extraDeg = 0` is the original fixed-level
 encoding; iterative-deepening drivers loop `extraDeg = 0, 1, …`.
 
-`useNewton` selects between the dense `monomialsUpTo` σ₀ basis
-(default, complete) and the support-dominance pruned σ₀ basis. The
-pruning is only applied to σ₀ — constraint multipliers σᵢ have no
-analogous cheap heuristic. The deepening driver is responsible for
-falling back to `useNewton = false` if a pruned attempt fails. -/
+`strategy` selects the σ₀ basis: `.dense` (default, complete),
+`.dominance` (support-dominance heuristic from #17), or `.newton`
+(half-Newton-polytope from Reznick — sound pruning via exact-rational
+LP). The pruning is only applied to σ₀ — constraint multipliers σᵢ
+have no analogous heuristic. The deepening driver is responsible for
+falling back to `.dense` if a pruned attempt fails. -/
 def buildBlocks (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := []) (extraDeg : Nat := 0)
-    (useNewton : Bool := false) :
+    (strategy : BasisStrategy := .dense) :
     Array (BlockSpec n) := Id.run do
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
@@ -195,9 +298,7 @@ def buildBlocks (target : CMvPolynomial n ℚ)
   let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
   let mut blocks : Array (BlockSpec n) := #[]
   let σ₀BasisDeg := halfCeil σ₀Deg + extraDeg
-  let σ₀Basis :=
-    if useNewton then supportDominanceBasis target σ₀BasisDeg
-    else monomialsUpTo n σ₀BasisDeg
+  let σ₀Basis := strategy.basisAt target σ₀BasisDeg
   let σ₀Basis :=
     if target.coeff (zeroMono n) = 0 then
       σ₀Basis.filter (fun m => m ≠ zeroMono n)
@@ -317,10 +418,10 @@ blocks zero weight — otherwise the objective drives `x⁺` and `x⁻` to
 infinity together. -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := [])
-    (extraDeg : Nat := 0) (useNewton : Bool := false) :
+    (extraDeg : Nat := 0) (strategy : BasisStrategy := .dense) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
       Array (CMvMonomial n) × Option Nat :=
-  let σBlocks := buildBlocks target gs ps extraDeg useNewton
+  let σBlocks := buildBlocks target gs ps extraDeg strategy
   let eqSpecs := buildEqCofactorSpecs target gs ps extraDeg
   let hasEqs := !ps.isEmpty
   let cumOffsets : Array Nat := Id.run do
@@ -619,10 +720,10 @@ validates. -/
 private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (useTraceCost : Bool) (extraDeg : Nat)
-    (useNewton : Bool := false)
+    (strategy : BasisStrategy := .dense)
     (maxRoundingDenom : Nat := 1048576) : IO (Option (Certificate n)) := do
   let (problem, blocks, eqSpecs, _monos, _) :=
-    buildSdp target gs (.feasibility useTraceCost) ps extraDeg useNewton
+    buildSdp target gs (.feasibility useTraceCost) ps extraDeg strategy
   if problem.b.size = 0 then
     if target = 0 then
       return some { sigma0 := { squares := [] },
@@ -670,7 +771,8 @@ Same config struct on the tactic side. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (maxRoundingDenom : Nat := 1048576)
-    (maxDepth : Nat := 0) : IO (Option (Certificate n)) := do
+    (maxDepth : Nat := 0) (basisStrategy : BasisStrategy := .newton) :
+    IO (Option (Certificate n)) := do
   -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
   -- HOL Light convention) but interacts badly with infeasibility
@@ -679,42 +781,51 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   -- standard mode and works on most non-boundary problems plus
   -- infeasibility. Try whichever is more likely to succeed first
   -- and fall back.
-  let strategies : List Bool := match goal with
+  let costStrategies : List Bool := match goal with
     | .infeasible => [false]
     | _           => [true, false]
-  -- Support-dominance pruning, gated to visibly sparse targets
-  -- (`4·|support| < C(n+D, D)`, the issue's suggested heuristic).
-  -- Disabled for infeasibility goals, where `target = -1` and the
-  -- support of `target` carries no information about which σ₀ basis
-  -- monomials can appear. The fallback to the full basis before
-  -- bumping `extraDeg` is mandatory for completeness — support-
-  -- dominance is strictly more aggressive than the correct half-
-  -- Newton-polytope condition.
+  -- Basis-pruning is disabled for infeasibility goals, where
+  -- `target = -1` and the support of `target` carries no information
+  -- about which σ₀ basis monomials can appear. The fallback to
+  -- `.dense` before bumping `extraDeg` is mandatory for completeness
+  -- — both Reznick (half-Newton) and support-dominance pass only
+  -- necessary conditions; they hold for *unconstrained* `σ₀`. In the
+  -- Putinar setting `target = σ₀ + Σ σᵢ·gᵢ`, σ₀ can absorb
+  -- cancellations against terms whose Newton polytope extends past
+  -- `½·Newton(target)`, so `.dense` is the safety net.
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
   let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
   let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
   let supportSize := target.monomials.length
   let dropConstant := target.coeff (zeroMono n) = 0
-  let newtonAllowed : Bool := match goal with
+  let pruneAllowed : Bool := match goal with
     | .infeasible => false
-    | _           => true
+    | _           => basisStrategy ≠ .dense
   for extraDeg in [0:maxDepth + 1] do
     let basisDeg := halfCeil σ₀Deg + extraDeg
     let fullBasisSize := (monomialsUpTo n basisDeg).size
-    let tryNewton : Bool :=
-      if !newtonAllowed then false
-      else if 4 * supportSize ≥ fullBasisSize then false
+    -- Sparsity gate (`4·|support| < C(n+D, D)`): for visibly dense
+    -- targets the pruning is unlikely to shrink the basis enough to
+    -- matter — and small σ₀ blocks (single-monomial bases on a
+    -- target with multiple-monomial supports) can drive CSDP into a
+    -- degenerate SDP that segfaults the FFI. We compute the pruned
+    -- basis only when the gate clears, and additionally require the
+    -- post-dropConstant size to be ≥ 2 and strictly less than dense.
+    -- The `≥ 2` floor is a defence against the CSDP crash on
+    -- pathologically small σ₀ blocks.
+    let basisStrategies : List BasisStrategy :=
+      if !pruneAllowed then [.dense]
+      else if 4 * supportSize ≥ fullBasisSize then [.dense]
       else
-        let newton := supportDominanceBasis target basisDeg
-        let post := if dropConstant then newton.filter (· ≠ zeroMono n) else newton
-        0 < post.size ∧ post.size < fullBasisSize
-    let newtonStrategies : List Bool :=
-      if tryNewton then [true, false] else [false]
-    for useNewton in newtonStrategies do
-      for useTraceCost in strategies do
+        let pruned := basisStrategy.basisAt target basisDeg
+        let post := if dropConstant then pruned.filter (· ≠ zeroMono n) else pruned
+        if 2 ≤ post.size ∧ post.size < fullBasisSize
+          then [basisStrategy, .dense] else [.dense]
+    for strat in basisStrategies do
+      for useTraceCost in costStrategies do
         if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
-            useNewton maxRoundingDenom then
+            strat maxRoundingDenom then
           return some cert
   return none
 
@@ -757,7 +868,8 @@ Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
 window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
-    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0) :
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
+    (basisStrategy : BasisStrategy := .newton) :
     IO (Option (StrictResult n)) := do
   -- Iteratively deepen alongside `runFeasibilitySearch`: each outer
   -- pass re-runs the LP-slack solve at the higher relaxation. Each
@@ -769,6 +881,10 @@ def runStrict (p : CMvPolynomial n ℚ)
   -- extraDeg)` pair. Bounded redundancy; acceptable for the simpler
   -- driver structure.
   for extraDeg in [0:maxDepth + 1] do
+    -- The LP-slack pass uses the `.dense` σ₀ basis. The slack solve
+    -- estimates `λ*`; dense is more robust against degeneracy and
+    -- the gain from pruning here is small compared to the inner
+    -- feasibility loops, which do honour `basisStrategy`.
     let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
       buildSdp p gs .lpSlack ps extraDeg
     let some lambdaBlockIdx := lambdaBlockIdx? | return none
@@ -800,7 +916,7 @@ def runStrict (p : CMvPolynomial n ℚ)
         let goal : Goal n := .strict p ε hε
         let targetPoly := p - CMvPolynomial.C ε
         match (← runFeasibilitySearch targetPoly gs ps goal maxRoundingDenom
-            (maxDepth := extraDeg)) with
+            (maxDepth := extraDeg) (basisStrategy := basisStrategy)) with
         | some cert => return some { cert, ε, hε }
         | none => pure ()
   return none
@@ -812,11 +928,14 @@ here is a defensive `none` for direct callers (the tactic surface
 routes `.strict` goals straight to `runStrict`). -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := [])
-    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0) :
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
+    (basisStrategy : BasisStrategy := .newton) :
     IO (Option (Certificate n)) := do
   match goal with
-  | .closed p   => runFeasibilitySearch p gs ps goal maxRoundingDenom maxDepth
-  | .infeasible => runFeasibilitySearch (-1) gs ps goal maxRoundingDenom maxDepth
+  | .closed p   =>
+    runFeasibilitySearch p gs ps goal maxRoundingDenom maxDepth basisStrategy
+  | .infeasible =>
+    runFeasibilitySearch (-1) gs ps goal maxRoundingDenom maxDepth basisStrategy
   | .strict ..  => return none
 
 end SOS.Search
