@@ -25,8 +25,11 @@ open Lean Elab Tactic Meta
 * `maxDepth` — iterative-deepening cap. At each `extraDeg ∈ [0..maxDepth]`
   the σ₀ and σᵢ bases grow by one monomial degree. Harrison's `REAL_SOS`
   reports needing depth up to 12; each level is a fresh CSDP solve and
-  scales combinatorially with the basis, so the default `0` keeps
-  failure paths cheap. Raise for hard targets.
+  scales combinatorially with the basis. The default is chosen
+  empirically against `SOSTest` — at the time of writing, `1` is the
+  largest value with no measurable wall-clock cost over `0`, and the
+  depth-1 retry unlocks the discriminant identity among others. Raise
+  per-call for hard targets.
 * `maxRoundingDenom` — upper cap on rounding-denominator candidates
   filtered against `SOS.Search.niceDenominators` (which itself tops out
   at `2^20`). Raise for targets whose `polyDenom` exceeds the cap;
@@ -37,7 +40,7 @@ open Lean Elab Tactic Meta
   the same `extraDeg` if the pruned variant doesn't certify, so the
   choice is a speed/sparsity knob, not a completeness one. -/
 structure Config where
-  maxDepth : Nat := 0
+  maxDepth : Nat := 1
   maxRoundingDenom : Nat := 1048576
   basisStrategy : SOS.Search.BasisStrategy := .newton
   deriving Inhabited
