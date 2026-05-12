@@ -1,109 +1,181 @@
 /-
-Speed-test candidate set. Build target is wall-clock < 60s for the
-whole file on the kim-em/sos main toolchain. The 1879 Zeng example
-runs with `sos (config := { maxDepth := 3 })` and contributes ~15s of
-CSDP wall-clock; every other example uses the default depth of 0.
+Copyright (c) 2026 Kim Morrison. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+
+`by sos` showcase — the primary entry point for evaluating this
+package. The tactic discharges polynomial (in)equality goals over
+ℝ (and ℤ / ℚ / ℕ, lifted automatically) by finding a Positivstellensatz
+certificate: it shells out to CSDP, rounds the floating-point Gram
+matrix to ℚ, then verifies the resulting sum-of-squares identity
+inside the kernel.
+
+Layout:
+
+* §1–§7 walk through the supported fragment by capability, starting
+  with one-line positivity goals and building up through constrained,
+  strict, equality-hypothesis, infeasibility, and ℕ/ℤ/ℚ-lifted forms.
+* §8 demonstrates the `sos?` → `sos_witness` workflow for inspecting
+  and pinning certificates.
+* §9 covers graceful failure (Motzkin, infimum-0 strict positivity)
+  and the out-of-scope-input error messages.
+
+The full Harrison `Examples/sos.ml` port (including known
+limitations) lives in `SOSTest.Harrison`. Internal-helper invariant
+checks live in `SOSTest.Internal`. Exact-rational simplex tests live
+in `SOSTest.RatSimplexTests`.
+
+Speed contract: this file builds in under 60s wall-clock.
 -/
 import SOS
 
 open SOS CPoly
 
--- 1. closed positivity, 1 var, deg 2
-example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
+/-! ## §1. Positivity over ℝ -/
 
--- 2. closed positivity, 1 var, deg 4
+example (x : ℝ) : 0 ≤ x^2 + 1 := by sos
 example (x : ℝ) : 0 ≤ x^4 + 1 := by sos
 
--- 3. perfect square (rank-1 boundary)
+-- Perfect squares, single-variable and multivariate.
 example (x : ℝ) : 0 ≤ x^2 + 2*x + 1 := by sos
-
--- 4. perfect square, multivariate, sign-mixed
 example (x y : ℝ) : 0 ≤ x^2 - 2*x*y + y^2 := by sos
-
--- 5. perfect square, multivariate
 example (x y : ℝ) : 0 ≤ x^2 + 2*x*y + y^2 := by sos
-
--- 6. (x²-1)² as deg-4 single-var
 example (x : ℝ) : 0 ≤ x^4 - 2*x^2 + 1 := by sos
 
--- 7. cyclic Schur, 3 vars
+-- Cyclic Schur, 3 variables.
 example (a b c : ℝ) :
     0 ≤ a^2 + b^2 + c^2 - a*b - b*c - a*c := by sos
 
--- 8. AM ≥ GM squared, 2 vars deg 4
+-- AM ≥ GM squared, 2 variables, degree 4.
 example (x y : ℝ) : 0 ≤ (x^2 + y^2)^2 - 4*x^2*y^2 := by sos
 
--- 9. strict positivity, 1 var deg 2
-example (x : ℝ) : 0 < x^2 + 1 := by sos
-
--- 10. strict positivity, 1 var deg 4
-example (x : ℝ) : 0 < x^4 + 1 := by sos
-
--- 11. strict positivity, 2 vars deg 2
-example (x y : ℝ) : 0 < x^2 + y^2 + 1 := by sos
-
--- 12. infeasibility, 1 var deg 2
-example (x : ℝ) : ¬ (x^2 + 1 ≤ 0) := by sos
-
--- 13. infeasibility, 1 var deg 4
-example (x : ℝ) : ¬ (x^4 + 1 ≤ 0) := by sos
-
--- 14. constrained, cubic
-example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^3 + x := by sos
-
--- 15. constrained, perfect-square modulo
-example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 - x + 1/4 := by sos
-
--- 16. constrained, multivariate
-example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
-    0 ≤ x^2 + 2*x*y + y^2 := by sos
-
--- 17. Cauchy–Schwarz: (a²+b²)(c²+d²) − (ac+bd)² ≥ 0  (rank 1, deg 4, 4 vars)
+-- Cauchy–Schwarz: `(a²+b²)(c²+d²) ≥ (ac+bd)²` — rank-1, degree-4, 4 variables.
 example (a b c d : ℝ) :
     0 ≤ (a^2 + b^2) * (c^2 + d^2) - (a*c + b*d)^2 := by sos
 
--- 18b. Strict-inequality constraint hypothesis. Promoted to `0 ≤`
--- in the elaborator via `le_of_lt`.
-example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
+/-! ## §2. General inequalities (`a ≤ b` / `a < b` form)
 
--- 18. Motzkin fall-through (NOT SOS)
-example : True := by
-  fail_if_success
-    (have : ∀ x y : ℝ, 0 ≤ x^4*y^2 + x^2*y^4 + 1 - 3*x^2*y^2 := by sos)
-  trivial
+`by sos` reifies arbitrary (in)equality conclusions, not just the
+`0 ≤ p` normal form — no manual rewrite required. -/
 
-/-! ### Strict positivity with tight or unfriendly bounds
+example (x : ℝ) : x ≤ x^2 + x + 1 := by sos
+example (x : ℝ) : x < x^2 + x + 2 := by sos
+example (x : ℝ) : -(x^2 + 1) ≤ 0 := by sos
 
-LP-slack discovers `λ*` and descends through `ε = 2^-k` from there.
-Including `polyDenom target` in the rounding schedule lets residuals
-with non-power-of-two denominators land on the natural rational grid,
-and `decide +kernel` verifies the certificate. -/
+/-! ## §3. Strict positivity
 
--- 19. non-power-of-two denominator (the residual ends up at denom 3200
--- after ε = 1/128 against `1/100`, requiring polyDenom-aware rounding).
+The strict-inequality path discovers a Putinar slack `λ*` via an LP
+solve and descends through `ε = 2^-k` from there. Including
+`polyDenom target` in the rounding schedule lets residuals with
+non-power-of-two denominators land on the natural rational grid. -/
+
+example (x : ℝ) : 0 < x^2 + 1 := by sos
+example (x : ℝ) : 0 < x^4 + 1 := by sos
+example (x y : ℝ) : 0 < x^2 + y^2 + 1 := by sos
+
+-- Non-power-of-two denominator: the residual ends up at denom 3200
+-- after ε = 1/128 against `1/100`, requiring polyDenom-aware rounding.
 example (x : ℝ) : 0 < x^2 + 1/100 := by sos
 
--- 20. multivariate, non-power-of-two denominator
+-- Multivariate, non-power-of-two denominator.
 example (x y : ℝ) : 0 < x^2 + y^2 + 1/500 := by sos
 
--- 21. tight strict positivity at the four-squares cap. `fourSquaresNat`
--- caps at `n ≤ 2^20`, which puts a floor of `ε ≥ 1/(2^20)` on what we
--- can certify by this pipeline.
+-- Tight strict positivity at the four-squares cap. `fourSquaresNat`
+-- caps at `n ≤ 2^20`, putting a floor of `ε ≥ 1/2^20` on what we can
+-- certify by this pipeline.
 example (x : ℝ) : 0 < x^2 + 1/1048576 := by sos
 
--- 22. infimum-0 strict positivity must fail gracefully.
--- p = (x*y − 1)² + x² is strictly positive everywhere on ℝ² (would need
--- x*y = 1 and x = 0 simultaneously) but its infimum is 0 along x → 0,
--- y = 1/x. No positive ε admits a Putinar certificate.
-example : True := by
-  fail_if_success
-    (have : ∀ x y : ℝ, 0 < (x*y - 1)^2 + x^2 := by sos)
-  trivial
+/-! ## §4. Constrained goals (Putinar quadratic module) -/
 
-/-! ### `sos?` produces a `Try this:` suggestion of `sos_witness …` -/
+example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^3 + x := by sos
+example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 - x + 1/4 := by sos
 
-/--
-info: Try this:
+example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
+    0 ≤ x^2 + 2*x*y + y^2 := by sos
+
+-- Strict-inequality constraint hypothesis: promoted to `0 ≤` in the
+-- elaborator via `le_of_lt`.
+example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
+
+-- Nonpos hypothesis (`h : x ≤ 0`), driving the `.neg`-wrapping in
+-- `recogniseConstraint` and the `aeval_nonneg_of_orig_neg` bridge in
+-- `SOS/Verifier.lean`.
+example (x : ℝ) (_h : x ≤ 0) : 0 ≤ -x := by sos
+
+/-! ## §5. Equality hypotheses
+
+The certificate gains a free polynomial cofactor `qⱼ` per equality
+`pⱼ = 0`. The verified identity becomes
+`target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ`. The reifier maps `a = b` to
+`pⱼ := a − b`; downstream the cofactor search is free to discover any
+sign for `qⱼ`. -/
+
+-- From `x*y = 1` conclude `0 ≤ x*y − 1`. Cofactor `q := 1`.
+example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos
+
+-- Degree-1 cofactor: `x = 1 → 0 ≤ x² − 1`. Search must discover
+-- `q := x + 1`. Load-bearing: the conclusion is false at `x := 0`
+-- without the equality.
+example (x : ℝ) (_h : x = 1) : 0 ≤ x^2 - 1 := by sos
+
+-- Strict positivity with equality, exercising `runStrict`'s cofactor
+-- path (both the λ-solve and the feasibility re-solve include cofactor
+-- blocks). Load-bearing: `0 < x²` is false at `x := 0`.
+example (x : ℝ) (_h : x = 1) : 0 < x^2 := by sos
+
+/-! ## §6. Infeasibility (`¬ p ≤ 0` conclusions) -/
+
+example (x : ℝ) : ¬ (x^2 + 1 ≤ 0) := by sos
+example (x : ℝ) : ¬ (x^4 + 1 ≤ 0) := by sos
+
+/-! ## §7. Lifting ℕ / ℤ / ℚ goals to ℝ
+
+The lift pre-pass in `SOS/Lift.lean` runs before `parseGoalAtomic`.
+It intros leading ℕ / ℤ / ℚ / ℝ universal binders, splits equality
+conclusions via `le_antisymm`, rewrites ℕ / ℤ strict inequalities via
+`lt_iff_add_one_le`, applies the cast bridge (`Nat.cast_le.mp`, etc.)
+on the conclusion, runs `rify at *` to lift hypotheses, and adds a
+`0 ≤ (↑a : ℝ)` hypothesis for every ℕ-typed cast atom now in the goal.
+
+The user-visible tactic name does not change — `by sos` auto-dispatches
+on the (in)equality type. Goals already over ℝ pay no overhead. -/
+
+-- ℤ: `(a − b)² ≥ 0`.
+example (a b : ℤ) : 2*a*b ≤ a^2 + b^2 := by sos
+
+-- ℤ Schur: `(a−b)² + (b−c)² + (a−c)² ≥ 0` divided by two.
+example (a b c : ℤ) : a*b + b*c + a*c ≤ a^2 + b^2 + c^2 := by sos
+
+-- ℚ strict: routed through `Rat.cast_lt.mp` to the ℝ strict-positivity path.
+example (x : ℚ) : 0 < x^2 + 1 := by sos
+
+-- ℚ: `(x² − y²)² ≥ 0`.
+example (x y : ℚ) : 4*x^2*y^2 ≤ (x^2 + y^2)^2 := by sos
+
+-- Mixed ℕ + ℝ — ℕ binder lifted, ℝ atom preserved.
+example : ∀ n : ℕ, ∀ x : ℝ, 0 ≤ x^2 + n := by sos
+
+-- ℕ-cast atom appears only in a hypothesis (conclusion is over ℝ with
+-- no ℕ casts). The lift pre-pass must scan local hypothesis types too,
+-- otherwise the `0 ≤ ↑n` fact never reaches the SOS reifier.
+example (n : ℕ) (x : ℝ) (_h : (n : ℝ) = x) : 0 ≤ x := by sos
+
+-- Strict ℕ via `Nat.lt_iff_add_one_le`. `n < n+1` rewrites to
+-- `n+1 ≤ n+1`, which the rewrite step closes reflexively before the
+-- cast bridge is needed.
+example : ∀ n : ℕ, n < n + 1 := by sos
+
+-- ℕ equality via `le_antisymm` split (Harrison `sos.ml:1725`). After
+-- the antisymmetric split both subgoals reduce to `0 ≤ 0`.
+example : ∀ m n : ℕ, 2*m + n = (n + m) + m := by sos
+
+/-! ## §8. `sos?` — inspect, then pin the witness
+
+`sos?` runs the search and prints a `Try this:` suggestion of an
+explicit `sos_witness`. The witness is then statically checked at
+elaboration time, with no CSDP call — useful for committing a
+certificate that you don't want re-derived on every build. -/
+
+/-- info: Try this:
   [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
 -/
 #guard_msgs in
@@ -113,508 +185,89 @@ example (x : ℝ) : 0 ≤ x^2 + 1 := by sos?
 example (x : ℝ) : 0 ≤ x^2 + 1 := by
   sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
 
-/-! ### Strict positivity: `sos?` suggestion includes `with ε := …` -/
-
-/--
-info: Try this:
+-- For strict positivity, the `Try this:` suggestion includes `with ε := …`.
+/-- info: Try this:
   [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.X 0] }, sigmas := [] } with ε := (1 : ℚ)
 -/
 #guard_msgs in
 example (x : ℝ) : 0 < x^2 + 1 := by sos?
 
--- And the suggested replacement compiles:
 example (x : ℝ) : 0 < x^2 + 1 := by
   sos_witness { sigma0 := { squares := [CMvPolynomial.X 0] }, sigmas := [] } with ε := (1 : ℚ)
 
-/-! ### Coverage: orphan code paths
+-- For equality goals the suggestion includes `eqCofs := …`.
+/-- info: Try this:
+  [apply] sos_witness { sigma0 := { squares := [] }, sigmas := [], eqCofs := [CMvPolynomial.C (1 : ℚ)] }
+-/
+#guard_msgs in
+example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos?
 
-The cases below exercise paths that aren't otherwise reached by the
-search-driven examples above:
+/-! ### `sos_witness` direct use
 
-* `nonpos` constraint hypothesis (`h : x ≤ 0`), driving the
-  `aeval_nonneg_of_orig_neg` bridge in `SOS/Verifier.lean`.
-* `sos_witness` with a constraint — the existing `sos_witness` smoke-
-  test above is unconstrained.
-* `sos_witness` for an infeasibility goal (`¬ p ≤ 0`) — exercises
-  the `.infeasible` arm of the witness elaborator. -/
+The witness elaborator also accepts certificates for constrained and
+infeasibility goals. (The cert structure must carry a `sigmas` entry
+per constraint to match `cert.checks`'s length check, even when the
+constraint isn't load-bearing.) -/
 
--- nonpos hypothesis: search-driven path closes via the .neg-wrapping
--- in `recogniseConstraint` and the `aeval_nonneg_of_orig_neg` bridge.
-example (x : ℝ) (_h : x ≤ 0) : 0 ≤ -x := by sos
-
--- sos_witness with a constraint. (The witness here is the trivial
--- σ₀ = x^2, σ₁ = 0 — `x^2 ≥ 0` doesn't need the `0 ≤ x` hypothesis,
--- but the cert structure must still carry a sigmas entry per
--- constraint to match `cert.checks`'s length check.)
+-- Constrained — trivial witness, exercising the constraint structural check.
 example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 := by
   sos_witness
     { sigma0 := { squares := [CMvPolynomial.X 0] },
       sigmas := [{ squares := [] }] }
 
--- sos_witness for infeasibility. `-1 = x^2 + 1·(-x^2 - 1)` proves
--- the constraint set `{x^2 + 1 ≤ 0}` is infeasible.
+-- Infeasibility — `-1 = x² + 1·(-x² - 1)` proves the constraint set
+-- `{x² + 1 ≤ 0}` is infeasible.
 example (x : ℝ) : ¬ (x^2 + 1 ≤ 0) := by
   sos_witness
     { sigma0 := { squares := [CMvPolynomial.X 0] },
       sigmas := [{ squares := [CMvPolynomial.C (1 : ℚ)] }] }
 
-/-! ### Examples ported from Harrison's HOL Light `Examples/sos.ml`
-
-Test cases lifted from John Harrison's TPHOLs 2007 implementation
-(`Examples/sos.ml` in jrh13/hol-light, lines 1611–1894). Restricted
-to the fragment our tactic supports: closed `0 ≤ p` / `0 < p` /
-`¬ p ≤ 0` conclusions with Putinar-style `0 ≤ g`, `g ≤ 0`, `0 < g`
-hypotheses. Examples involving equality hypotheses, disequalities,
-disjunctive conclusions, `abs`, division, integer/natural arithmetic,
-or Boolean combinations are out of the supported fragment and not
-ported here.
-
-Examples flagged with `-- FIXME` were verified by hand-running each
-through `by sos` in isolation; they're within the supported fragment
-but don't currently produce a certificate. Iterative deepening (opt
-in via `sos (config := { maxDepth := k })`) recovers some — see 1879
-below — but several FIXMEs still resist: the deepened SDP either
-fails to converge or returns a Gram that doesn't round to PSD.
-Half-Newton-polytope basis pruning (#23) has landed and doesn't move
-any of these FIXMEs; the residual failures are about rounding,
-preordering / Schmüdgen-style encodings, or the cofactor-LP recession
-on equality-hypothesis goals, not σ₀ basis size. -/
-
-/-! #### Direct SOS, no hypotheses (Harrison's `SOS_CONV` / `PURE_SOS`) -/
-
--- sos.ml:1789 — 2-variable degree-4
-example (x y : ℝ) :
-    0 ≤ 2*x^4 + 2*x^3*y - x^2*y^2 + 5*y^4 := by sos
-
--- sos.ml:1792 — 3-variable degree-4
-example (x y z : ℝ) :
-    0 ≤ x^4 - (2*y*z + 1)*x^2 + (y^2*z^2 + 2*y*z + 2) := by sos
-
--- sos.ml:1796 — 2-variable degree-4
-example (x y : ℝ) :
-    0 ≤ 4*x^4 + 4*x^3*y - 7*x^2*y^2 - 2*x*y^3 + 10*y^4 := by sos
-
--- sos.ml:1809 — 3-variable degree-6
-example (x y z : ℝ) :
-    0 ≤ 9*x^2*y^4 + 9*x^2*z^4 + 36*x^2*y^3 + 36*x^2*y^2
-        - 48*x*y*z^2 + 4*y^4 + 4*z^4 - 16*y^3 + 16*y^2 := by sos
-
--- sos.ml:1814 — Motzkin × `(x²+y²+z²)` is SOS (Hilbert-17 style witness)
-example (x y z : ℝ) :
-    0 ≤ (x^2 + y^2 + z^2) *
-        (x^4*y^2 + x^2*y^4 + z^6 - 3*x^2*y^2*z^2) := by sos
-
--- sos.ml:1800 — 2-variable degree-10 sparse. Half-Newton-polytope
--- pruning (#23) closes the SDP that the dense `monomialsUpTo 2 5`
--- basis (21 monomials) cannot.
-example (x y : ℝ) :
-    0 ≤ 4*x^4*y^6 + x^2 - x*y^2 + y^2 := by sos
-
--- FIXME sos.ml:1802 — 2-variable degree-6, Motzkin-like form. Likely
--- needs iterative deepening to bump the multiplier basis past
--- `⌈6/2⌉ = 3`.
--- example (x z : ℝ) :
---     0 ≤ 4096 * (x^4 + x^2 + z^6 - 3*x^2*z^2) + 729 := by sos
-
--- FIXME sos.ml:1805 — 2-variable degree-6 with linear `30*x*y` and
--- constants. Dense attempt misses on rounding. Newton pruning (#23)
--- doesn't fire either — the sparsity gate (`4·|support| ≥
--- C(n+D, D)`) skips it: 7 support monomials against a 10-monomial
--- dense σ₀ basis. Confirmed at `maxDepth := 2` too.
--- example (x y : ℝ) :
---     0 ≤ 120*x^2 - 63*x^4 + 10*x^6 + 30*x*y - 120*y^2 + 120*y^4 + 31 := by sos
-
--- FIXME sos.ml:1819 — 3-variable degree-4 with linear+constant tail.
--- Surprising failure given the modest degree; likely a rounding miss
--- on the Gram matrix (the polynomial is bounded below by ≈ 1.59).
--- Newton pruning (#23) doesn't move it (confirmed at `maxDepth :=
--- 2`), consistent with the rounding-miss diagnosis.
--- example (x y z : ℝ) :
---     0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 := by sos
-
--- FIXME sos.ml:1829 — 100·sum-of-squares − 588. The unsubtracted form
--- is trivially SOS; subtracting 588 forces the search to find a
--- non-trivial decomposition that survives rounding.
--- example (x : ℝ) :
---     0 ≤ 100*((2*x - 2)^2 + (x^3 - 8*x - 2)^2) - 588 := by sos
-
--- FIXME sos.ml:1832 — Rearranged form of the 1805 polynomial, fails
--- for the same reason: not sparse enough for Newton pruning to fire,
--- dense rounding misses.
--- example (x y : ℝ) :
---     0 ≤ x^2*(120 - 63*x^2 + 10*x^4) + 30*x*y
---         + 30*y^2*(4*y^2 - 4) + 31 := by sos
-
-/-! #### Hard univariate `PURE_SOS` examples -/
-
--- sos.ml:1844 — degree-12 univariate
-example (x : ℝ) :
-    0 ≤ 98*x^12 - 980*x^10 + 3038*x^8 - 2968*x^6
-        + 1022*x^4 - 84*x^2 + 2 := by sos
-
--- sos.ml:1853 — degree-14 univariate
-example (x : ℝ) :
-    0 ≤ 2*x^14 - 84*x^12 + 1022*x^10 - 2968*x^8
-        + 3038*x^6 - 980*x^4 + 98*x^2 := by sos
-
--- FIXME sos.ml:1840 — strict `≥ 1/7` bound on the 1819 polynomial.
--- Fails for the same reason as 1819.
--- example (x y z : ℝ) :
---     0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 - 1/7 := by sos
-
-/-! #### Zeng et al. (JSC 37, 2004) — Harrison's PURE_SOS battery -/
-
--- sos.ml:1867 — 3-var degree-6 Schur-style
-example (x y z : ℝ) :
-    0 ≤ x^6 + y^6 + z^6 - 3*x^2*y^2*z^2 := by sos
-
--- sos.ml:1870
-example (x y z : ℝ) :
-    0 ≤ x^4 + y^4 + z^4 + 1 - 4*x*y*z := by sos
-
--- sos.ml:1872
-example (x y z : ℝ) :
-    0 ≤ x^4 + 2*x^2*z + x^2 - 2*x*y*z + 2*y^2*z^2
-        + 2*y*z^2 + 2*z^2 - 2*x + 2*y*z + 1 := by sos
-
--- sos.ml:1891 — 4-variable degree-6
-example (x y z w : ℝ) :
-    0 ≤ w^6 + 2*z^2*w^3 + x^4 + y^4 + z^4 + 2*x^2*w + 2*x^2*z
-        + 3*x^2 + w^2 + 2*z*w + z^2 + 2*z + 2*w + 1 := by sos
-
--- FIXME sos.ml:1886 — 4-variable degree-4, with cross-terms
--- `2*x*y*z^2 + 2*x*y*w^2`. The dense σ₀ basis has 15 monomials
--- (`C(4+2, 2)`); the SDP solves but rounding misses, and the target
--- isn't sparse enough for Newton pruning (#23) to fire.
--- example (x y z w : ℝ) :
---     0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
---         + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
-
--- sos.ml:1879 — Harrison's flagged hard Zeng case. Harrison notes
--- "REAL_SOS does finally converge on the second run at level 12";
--- our iterative deepening closes it at level 3 (we opt in here via
--- the per-call `config`; the default `maxDepth = 0` keeps the
--- failure path cheap on the other examples).
-example (x y z : ℝ) :
-    0 ≤ x^4*y^4 - 2*x^5*y^3*z^2 + x^6*y^2*z^4
-        + 2*x^2*y^3*z - 4*x^3*y^2*z^3 + 2*x^4*y*z^5
-        + z^2*y^2 - 2*z^4*y*x + z^6*x^2 := by
-  sos (config := { maxDepth := 3 })
-
-/-! #### REAL_SOS with Putinar-style hypotheses -/
-
--- sos.ml:1718 — `0 ≤ x ∧ 0 ≤ y ⇒ x*y*(x+y)² ≤ (x²+y²)²`
-example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
-    0 ≤ (x^2 + y^2)^2 - x*y*(x + y)^2 := by sos
-
--- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The natural
--- certificate is `(x-1)(y-1) = 1·g₁·g₂`, i.e. a *product* of the two
--- inequality multipliers — a preordering term, not a quadratic-module
--- term `σ₀ + Σ σᵢ·gᵢ`. Iterative deepening (any `maxDepth`) grows σᵢ
--- but doesn't add product terms `σᵢⱼ·gᵢ·gⱼ`, so the search stays
--- infeasible. Cure is preordering-style (Schmüdgen) encoding.
--- example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
---     0 ≤ x*y - (x + y - 1) := by sos
-
--- FIXME sos.ml:1657 — strict version of the above. The closed
--- inequality is tight at `x = y = 1` (boundary of `x ≥ 1, y ≥ 1`),
--- so the strict inequality has no uniform ε slack; even with a
--- preordering encoding `runStrict` would have to keep ε bounded
--- away from the constraint boundary, which the LP-slack solve
--- doesn't enforce.
--- example (x y : ℝ) (_hx : 0 < x - 1) (_hy : 0 < y - 1) :
---     0 < x*y - (x + y - 1) := by sos
-
--- FIXME sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`.
--- Putinar form needs degree-2 multipliers on the linear hypotheses;
--- raising `maxDepth` grows the basis but CSDP still can't round to
--- a valid Gram at any depth I've tried. Newton pruning (#23) doesn't
--- fix it either — diagnosis is rounding / preordering, not basis
--- size.
--- example (x y z : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_hz : 0 ≤ z)
---     (_hs : x + y + z - 3 ≤ 0) :
---     0 ≤ x*y + x*z + y*z - 3*x*y*z := by sos
-
--- FIXME sos.ml:1682 — interval `[2,4]³` Schur. Six interval
--- hypotheses blow up the SDP at the fixed relaxation level
--- (>60s timeout in isolation).
--- example (x y z : ℝ)
---     (_hx1 : 0 ≤ x - 2) (_hx2 : 0 ≤ 4 - x)
---     (_hy1 : 0 ≤ y - 2) (_hy2 : 0 ≤ 4 - y)
---     (_hz1 : 0 ≤ z - 2) (_hz2 : 0 ≤ 4 - z) :
---     0 ≤ 2*(x*z + x*y + y*z) - (x^2 + y^2 + z^2) := by sos
-
--- FIXME sos.ml:1672 — dodecahedral, intervals to `125841/50000`. Same
--- shape as 1682; same blow-up.
--- example (x y z : ℝ)
---     (_hx1 : 0 ≤ x - 2) (_hx2 : 0 ≤ 125841/50000 - x)
---     (_hy1 : 0 ≤ y - 2) (_hy2 : 0 ≤ 125841/50000 - y)
---     (_hz1 : 0 ≤ z - 2) (_hz2 : 0 ≤ 125841/50000 - z) :
---     0 ≤ 2*(x*z + x*y + y*z) - (x^2 + y^2 + z^2) := by sos
-
--- FIXME sos.ml:1690 — sharp `≥ 12` bound on the same interval.
--- Harrison reports needing depth 12; iterative deepening required.
--- example (x y z : ℝ)
---     (_hx1 : 0 ≤ x - 2) (_hx2 : 0 ≤ 4 - x)
---     (_hy1 : 0 ≤ y - 2) (_hy2 : 0 ≤ 4 - y)
---     (_hz1 : 0 ≤ z - 2) (_hz2 : 0 ≤ 4 - z) :
---     0 ≤ 2*(x*z + x*y + y*z) - (x^2 + y^2 + z^2) - 12 := by sos
-
-/-! ### Pure invariant checks for search/round/reconstruct helpers
-
-These exercise internal helpers (`monomialsUpTo`, `decodeSdpBlock`,
-`LDL.reconstruct`) on degenerate inputs, so a refactor that
-mis-handles the empty / null case is caught here rather than only by
-the end-to-end `by sos` examples above. -/
-
-/-! The denser rounding schedule (#15) is `[1..63]` followed by
-alternating `2^k`, `3·2^(k-1)` for `k = 6..19`, then `2^20`. -/
-#guard SOS.Search.niceDenominators.length = 63 + 14 * 2 + 1
-#guard (SOS.Search.niceDenominators.take 63) =
-    ((List.range 63).map (fun i => (i + 1 : ℚ)))
-#guard (SOS.Search.niceDenominators.drop 63).take 6 =
-    [(64 : ℚ), 96, 128, 192, 256, 384]
-#guard SOS.Search.niceDenominators.getLast? = some (1048576 : ℚ)
--- Densified region was absent from the old `[1..31] ++ [2^5..2^20]`.
-#guard SOS.Search.niceDenominators.contains (45 : ℚ)
-#guard SOS.Search.niceDenominators.contains (96 : ℚ)
-
-#guard (SOS.Search.monomialsUpTo 2 2).size = 6
-#guard
-  match (SOS.Search.monomialsUpTo 2 2)[1]? with
-  | some m =>
-    let a := CMvMonomial.degreeOf m ⟨0, by decide⟩
-    let b := CMvMonomial.degreeOf m ⟨1, by decide⟩
-    a = 1 ∧ b = 0
-  | none => False
-
-#guard
-  match SOS.Search.decodeSdpBlock (1 : ℚ) 2 FloatArray.empty with
-  | none => true
-  | some _ => false
-
-#guard
-  match SOS.LDL.reconstruct 2 (#[] : Array ℚ)
-      (#[] : Array (CMvPolynomial 1 ℚ)) with
-  | none => true
-  | some _ => false
-
-/-! ### Equality hypotheses
-
-The certificate gains a free polynomial cofactor `qⱼ` per equality `pⱼ
-= 0`. The verified identity becomes
-`target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ`.
-
-The reifier maps `a = b` to `pⱼ := a − b`; downstream the cofactor
-search is free to discover any sign for `qⱼ`. -/
-
--- E1. sos_witness for an equality goal: from `x*y = 1` conclude
--- `0 ≤ x*y − 1`. Cofactor `q := 1` against the equality polynomial
--- `p := x*y − 1` gives `x*y − 1 = 0 + 1 · (x*y − 1)`.
-example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by
-  sos_witness
-    { sigma0 := { squares := [] },
-      sigmas := [],
-      eqCofs := [CMvPolynomial.C (1 : ℚ)] }
-
--- E2. Search-driven equality goal. Same identity as E1 — the cofactor
--- search should discover `q := 1` automatically.
-example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos
-
--- E2b. Search-driven, degree-1 cofactor. From `x = 1` conclude
--- `0 ≤ x² − 1`. The search must discover `q := x + 1`:
--- `x² − 1 = (x + 1)(x − 1)`. The equality is load-bearing — without
--- it the conclusion is false (take `x := 0`).
-example (x : ℝ) (_h : x = 1) : 0 ≤ x^2 - 1 := by sos
-
--- E2b-control. The same conclusion without the equality hypothesis
--- must fail, confirming E2b genuinely exercises the equality path.
-example : True := by
-  fail_if_success
-    (have : ∀ x : ℝ, 0 ≤ x^2 - 1 := by sos)
-  trivial
-
--- E2c. Search-driven, strict positivity with equality. `x = 1` gives
--- `x² = 1`, so `0 < x²`. Exercises `runStrict`'s equality path: both
--- the λ-solve and the feasibility re-solve include cofactor blocks.
--- Load-bearing: `0 < x²` is false at `x := 0`.
-example (x : ℝ) (_h : x = 1) : 0 < x^2 := by sos
-
--- E2c-control. Same conclusion without the equality must fail.
-example : True := by
-  fail_if_success
-    (have : ∀ x : ℝ, 0 < x^2 := by sos)
-  trivial
-
--- E3. Combine an inequality and an equality. From `0 ≤ x − 1` (i.e.
--- `x ≥ 1`) and `x = 0` derive `False`.
--- Certificate: `−1 = 0 + 1 · (x − 1) + (−1) · x`.
+-- Combined inequality + equality: from `0 ≤ x − 1` and `x = 0` derive
+-- `False`. Certificate: `−1 = 0 + 1·(x − 1) + (−1)·x`.
 example (x : ℝ) (_hx : 0 ≤ x - 1) (_hxz : x = 0) : False := by
   sos_witness
     { sigma0 := { squares := [] },
       sigmas := [{ squares := [CMvPolynomial.C (1 : ℚ)] }],
       eqCofs := [-CMvPolynomial.C (1 : ℚ)] }
 
--- E4. `sos?` on an equality goal — the suggestion includes `eqCofs := …`.
-/--
-info: Try this:
-  [apply] sos_witness { sigma0 := { squares := [] }, sigmas := [], eqCofs := [CMvPolynomial.C (1 : ℚ)] }
--/
-#guard_msgs in
-example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos?
+/-! ## §9. Graceful failure & out-of-scope guards -/
 
-/-! #### Harrison `sos.ml` equality-hypothesis tests
-
-These were excluded from the original Harrison port because the
-tactic didn't support equality hypotheses. With this PR they enter
-the supported fragment, but the cofactor LP encoding's numerical
-degeneracy (zero-cost split variables for `x⁺ − x⁻` leave primal
-recession directions for CSDP) means the search doesn't yet converge
-on them. Marked `FIXME`: provide via `sos_witness` for now, revisit
-when the cofactor SDP gets a regularisation pass. -/
-
--- sos.ml:1647 — `x²+y²+z² = 1 → 0 ≤ 3 − (x+y+z)²`. Cofactor `q := −3`
--- (degree 0, so within the search's basis bound) and SOS residual
--- `(x−y)² + (y−z)² + (z−x)²`.
-example (x y z : ℝ) (_h : x^2 + y^2 + z^2 = 1) :
-    0 ≤ 3 - (x + y + z)^2 := by sos
-
--- Control for sos.ml:1647: same conclusion without the equality must
--- fail (false at `x := y := z := 2`).
+-- Motzkin is nonneg but not SOS, so search must fail gracefully.
 example : True := by
   fail_if_success
-    (have : ∀ x y z : ℝ, 0 ≤ 3 - (x + y + z)^2 := by sos)
+    (have : ∀ x y : ℝ, 0 ≤ x^4*y^2 + x^2*y^4 + 1 - 3*x^2*y^2 := by sos)
   trivial
 
--- sos.ml:1650 — `w²+x²+y²+z² = 1 → (w+x+y+z)² ≤ 4`. Four-variable
--- analogue of 1647. The search should find σ₀ = Σ_{i<j} (vᵢ - vⱼ)²
--- and q = -4.
-example (w x y z : ℝ) (_h : w^2 + x^2 + y^2 + z^2 = 1) :
-    0 ≤ 4 - (w + x + y + z)^2 := by sos
-
--- Control for sos.ml:1650: false at `w = x = y = z := 10`.
+-- Infimum-0 strict positivity must also fail gracefully. `p = (x*y −
+-- 1)² + x²` is strictly positive everywhere on ℝ² but its infimum is
+-- 0 along `x → 0, y = 1/x`. No positive ε admits a Putinar certificate.
 example : True := by
   fail_if_success
-    (have : ∀ w x y z : ℝ, 0 ≤ 4 - (w + x + y + z)^2 := by sos)
+    (have : ∀ x y : ℝ, 0 < (x*y - 1)^2 + x^2 := by sos)
   trivial
 
--- sos.ml:1629 — discriminant: `a·x²+b·x+c = 0 → 0 ≤ b² − 4ac`.
--- Identity: `b² − 4ac = (2ax + b)² + (−4a)·(ax² + bx + c)`. The
--- cofactor `−4a` has degree 1; with `sos (config := { maxDepth := 1 })`
--- the cofactor basis is wide enough and `by sos` does find a
--- certificate — but the search takes ~2.5 minutes of CSDP time, well
--- past the speed-test budget. We keep the witness here so the file
--- stays fast; switch to `by sos (config := { maxDepth := 1 })` once
--- basis pruning (#17) brings the cost down. Atom order: `b, a, c, x`
--- (b is first because the conclusion `b² − 4ac` is walked left-to-
--- right; b gets index 0, a index 1, c index 2; x is new from the
--- hypothesis at index 3).
-example (a b c x : ℝ) (_h : a*x^2 + b*x + c = 0) :
-    0 ≤ b^2 - 4*a*c := by
-  sos_witness
-    { sigma0 :=
-        { squares := [CMvPolynomial.C (2 : ℚ) * CMvPolynomial.X 1
-                        * CMvPolynomial.X 3 + CMvPolynomial.X 0] },
-      sigmas := [],
-      eqCofs := [-(CMvPolynomial.C (4 : ℚ) * CMvPolynomial.X 1)] }
-
--- Control for sos.ml:1629: false at `a = c := 1, b := 0`.
+-- Controls for the equality-hypothesis examples in §5: same conclusion
+-- without the equality must fail, confirming the equality path was
+-- genuinely exercised above.
 example : True := by
   fail_if_success
-    (have : ∀ a b c : ℝ, 0 ≤ b^2 - 4*a*c := by sos)
+    (have : ∀ x : ℝ, 0 ≤ x^2 - 1 := by sos)
   trivial
 
--- FIXME sos.ml:1714 — `x*y = 1 → 0 ≤ x² + y² − x*y*(x+y)`. The search
--- doesn't converge; we don't have a clean hand-cert with a low-degree
--- cofactor either (working modulo `xy − 1` leaves the residual
--- `x² + y² − x − y`, which is only nonneg on the variety `V(xy = 1)`
--- and needs degree-≥-2 SOS work to certify globally).
--- example (x y : ℝ) (_h : x*y = 1) :
---     0 ≤ x^2 + y^2 - x*y*(x + y) := by sos
-
-/-! ### Lifting ℕ / ℤ / ℚ goals to ℝ
-
-The lift pre-pass in `SOS/Lift.lean` runs before `parseGoalAtomic`.
-It intros all leading ℕ / ℤ / ℚ / ℝ universal binders, splits equality
-conclusions via `le_antisymm`, rewrites ℕ / ℤ strict inequalities via
-`lt_iff_add_one_le`, applies the cast bridge (`Nat.cast_le.mp`, etc.)
-on the conclusion, runs `rify at *` to lift hypotheses, and adds a
-`0 ≤ (↑a : ℝ)` hypothesis for every ℕ-typed cast atom now appearing
-in the goal.
-
-The user-visible tactic name does not change — `by sos` auto-
-dispatches on the (in)equality type. Goals whose `(in)equalities are
-already over ℝ pay no overhead (the pre-pass is a no-op for them).
-
-DIV / MOD support is split out as #24; this PR refuses such goals
-with a hint pointing at that issue. ℕ subtraction is also out of
-scope. -/
-
-/-! #### General `a ≤ b` / `a < b` over ℝ (reifier extension only) -/
-
--- Without the reifier extension, a goal like this would have required
--- the user to rewrite manually to `0 ≤ b − a` first.
-example (x : ℝ) : x ≤ x^2 + x + 1 := by sos
-example (x : ℝ) : x < x^2 + x + 2 := by sos
-example (x : ℝ) : -(x^2 + 1) ≤ 0 := by sos
-
-/-! #### ℤ goals -/
-
--- `(a − b)²  ≥ 0`.
-example (a b : ℤ) : 2*a*b ≤ a^2 + b^2 := by sos
-
--- Schur over ℤ: `(a−b)² + (b−c)² + (a−c)² ≥ 0` divided by two.
-example (a b c : ℤ) : a*b + b*c + a*c ≤ a^2 + b^2 + c^2 := by sos
-
-/-! #### ℚ goals -/
-
--- Strict over ℚ: routed through `Rat.cast_lt.mp` to the ℝ
--- strict-positivity path.
-example (x : ℚ) : 0 < x^2 + 1 := by sos
-
--- `(x² − y²)² ≥ 0`.
-example (x y : ℚ) : 4*x^2*y^2 ≤ (x^2 + y^2)^2 := by sos
-
-/-! #### Mixed ℕ + ℝ — ℕ binder lifted, ℝ atom preserved -/
-
-example : ∀ n : ℕ, ∀ x : ℝ, 0 ≤ x^2 + n := by sos
-
--- ℕ-cast atom appears only in a hypothesis (the conclusion is over ℝ
--- with no ℕ casts). The lift pre-pass must scan local hypothesis types
--- too, otherwise the `0 ≤ ↑n` fact never reaches the SOS reifier.
-example (n : ℕ) (x : ℝ) (_h : (n : ℝ) = x) : 0 ≤ x := by sos
-
-/-! #### Strict ℕ via `Nat.lt_iff_add_one_le` -/
-
--- `n < n+1` rewrites to `n+1 ≤ n+1`, which the rewrite step closes
--- reflexively before the cast bridge is needed. The `runSosWithLift`
--- driver detects the empty-goal state and exits cleanly.
-example : ∀ n : ℕ, n < n + 1 := by sos
-
-/-! #### ℕ equality via `le_antisymm` split
-
-Harrison `sos.ml:1725`. The conclusion is a pure rewrite identity, so
-after the antisymmetric split both subgoals reduce to `0 ≤ 0`. -/
-example : ∀ m n : ℕ, 2*m + n = (n + m) + m := by sos
-
-/-! #### Out-of-scope guards
-
-Both checks throw a specific error pointing the user at the workaround
-or the tracking issue. The asserted strings below pin those exact
-messages, so changing them is a deliberate UX choice rather than a
-silent drift. -/
+example : True := by
+  fail_if_success
+    (have : ∀ x : ℝ, 0 < x^2 := by sos)
+  trivial
 
 -- Truncated ℕ subtraction is refused with a hint.
-/--
-error: sos: `by sos` does not handle truncated ℕ subtraction in goals; cast to `Int.sub`, or rewrite via `Nat.sub_eq` with `m ≤ n` in context.
+/-- error: sos: `by sos` does not handle truncated ℕ subtraction in goals; cast to `Int.sub`, or rewrite via `Nat.sub_eq` with `m ≤ n` in context.
 -/
 #guard_msgs in
 example : ∀ n : ℕ, n - 1 ≤ n := by sos
 
--- ℕ / ℤ division and modulo are refused (DIV / MOD support tracked
--- in https://github.com/kim-em/sos/issues/24).
-/--
-error: sos: `by sos` does not handle `Nat.div` / `Int.div`; DIV / MOD support is tracked in https://github.com/kim-em/sos/issues/24.
+-- ℕ / ℤ division and modulo are refused (DIV / MOD support tracked in
+-- https://github.com/kim-em/sos/issues/24).
+/-- error: sos: `by sos` does not handle `Nat.div` / `Int.div`; DIV / MOD support is tracked in https://github.com/kim-em/sos/issues/24.
 -/
 #guard_msgs in
 example : ∀ a b : ℕ, b ≠ 0 → a / b * b ≤ a := by sos
