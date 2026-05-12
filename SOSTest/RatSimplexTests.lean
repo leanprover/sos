@@ -82,35 +82,18 @@ example :
 These are the three motivating examples from issue #23. -/
 
 /-- `target = x⁴ + y⁴`, candidate `α = (1, 1)`: `2α = (2, 2)` is the
-Newton midpoint of the segment from `(4, 0)` to `(0, 4)`. Newton
-admits it; support-dominance does not. -/
+Newton midpoint of the segment from `(4, 0)` to `(0, 4)`. -/
 example :
     isInHalfNewton
         ((CMvPolynomial.X 0 : CMvPolynomial 2 ℚ)^4 + (CMvPolynomial.X 1)^4)
         ⟨#[1, 1], rfl⟩ = true := by
   native_decide
 
-/-- For the same `target = x⁴ + y⁴`, support-dominance excludes
-`(1, 1)` because `2·(1,1) = (2,2)` is componentwise dominated by
-neither `(4, 0)` nor `(0, 4)`. -/
-example :
-    ((supportDominanceBasis
-        ((CMvPolynomial.X 0 : CMvPolynomial 2 ℚ)^4 + (CMvPolynomial.X 1)^4) 2)
-      |>.contains ⟨#[1, 1], rfl⟩) = false := by
-  native_decide
-
 /-- `target = x²` in 2 vars, candidate `α = (0, 0)`: `2α = (0, 0)` is
-not in the singleton Newton polytope `{(2, 0)}`. Newton rejects.
-Support-dominance accepts it (since `(0, 0) ≤ (2, 0)` componentwise) —
-the unsoundness highlighted in issue #23. -/
+not in the singleton Newton polytope `{(2, 0)}`. Newton rejects. -/
 example :
     isInHalfNewton ((CMvPolynomial.X 0 : CMvPolynomial 2 ℚ)^2)
         ⟨#[0, 0], rfl⟩ = false := by
-  native_decide
-
-example :
-    ((supportDominanceBasis ((CMvPolynomial.X 0 : CMvPolynomial 2 ℚ)^2) 0)
-      |>.contains ⟨#[0, 0], rfl⟩) = true := by
   native_decide
 
 /-- `target = x⁴ + x²y² + y⁴`, `α = (1, 1)`: `2α = (2, 2)` is itself a

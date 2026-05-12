@@ -32,11 +32,9 @@ open Lean Elab Tactic Meta
   lower to fail faster on goals you know won't round cleanly.
 * `basisStrategy` — σ₀ basis pruning. `.newton` (default) uses
   Reznick's half-Newton-polytope test via an exact-rational simplex;
-  `.dominance` uses the cheap support-dominance heuristic from #17;
-  `.dense` disables pruning entirely. In all cases a `.dense`
-  fallback runs at the same `extraDeg` if the pruned variant doesn't
-  certify, so the strategy choice is a speed/sparsity knob, not a
-  completeness one. -/
+  `.dense` disables pruning entirely. A `.dense` fallback runs at
+  the same `extraDeg` if the pruned variant doesn't certify, so the
+  choice is a speed/sparsity knob, not a completeness one. -/
 structure Config where
   maxDepth : Nat := 0
   maxRoundingDenom : Nat := 1048576

@@ -98,33 +98,6 @@ at moderate variable counts. -/
 def monomialsUpTo (n d : Nat) : Array (CMvMonomial n) :=
   monomialsUpToAux n n d #[] (by simp) #[]
 
-/-- Componentwise support-dominance check: does there exist a monomial
-`m'` in `targetMonos` such that `2 * m[i] ≤ m'[i]` for every `i < n`?
-This is the cheap O(|support|·n) approximation to the half-Newton-
-polytope condition `2·exp(m) ∈ Newton(target)`; the proper
-convex-hull condition is strictly tighter (cf. #23). -/
-@[inline] private def supportDominated (n : Nat) (m : CMvMonomial n)
-    (targetMonos : Array (CMvMonomial n)) : Bool := Id.run do
-  for m' in targetMonos do
-    let mut ok := true
-    for i in [0:n] do
-      if 2 * m[i]! > m'[i]! then
-        ok := false
-        break
-    if ok then return true
-  return false
-
-/-- Support-dominance basis for σ₀: those monomials `m` with
-`totalDeg m ≤ deg` that are componentwise support-dominated by some
-monomial of `target`. Equivalent to filtering `monomialsUpTo n deg`
-through `supportDominated`. Always returns a subset of `monomialsUpTo
-n deg`. -/
-def supportDominanceBasis (target : CMvPolynomial n ℚ) (deg : Nat) :
-    Array (CMvMonomial n) :=
-  let targetMonos : Array (CMvMonomial n) := target.monomials.toArray
-  if targetMonos.isEmpty then #[]
-  else (monomialsUpTo n deg).filter (fun m => supportDominated n m targetMonos)
-
 /-! ### Half-Newton-polytope membership
 
 Reznick's theorem: if `target = Σⱼ qⱼ²`, every monomial appearing in
@@ -191,10 +164,9 @@ def isInHalfNewton (target : CMvPolynomial n ℚ) (m : CMvMonomial n) :
 /-- Half-Newton-polytope basis for σ₀: those monomials `m` with
 `totalDegree m ≤ deg` such that `2·exp(m) ∈ Newton(target)`.
 
-This is Reznick's tightest necessary condition: any monomial that can
-appear in any `qⱼ` of `target = Σⱼ qⱼ²` lies in this set. It is
-**not** comparable to `supportDominanceBasis` — each admits monomials
-the other rejects. Newton is the principled (sound) of the two. -/
+This is Reznick's tightest necessary condition for unconstrained σ₀:
+any monomial that can appear in any `qⱼ` of `target = Σⱼ qⱼ²` lies in
+this set. -/
 def newtonBasis (target : CMvPolynomial n ℚ) (deg : Nat) :
     Array (CMvMonomial n) :=
   if target.monomials.isEmpty then #[]
@@ -203,14 +175,13 @@ def newtonBasis (target : CMvPolynomial n ℚ) (deg : Nat) :
 /-- Basis-selection strategy for the σ₀ block.
 
 * `.dense` — `monomialsUpTo n σ₀BasisDeg`. Complete; the safety net.
-* `.dominance` — `supportDominanceBasis`. The cheap heuristic from
-  #17. Strictly aggressive — can exclude monomials Newton would
-  admit. Kept for benchmarking / debugging.
-* `.newton` — `newtonBasis`. Reznick's half-Newton-polytope. The
-  principled, sound pruning. -/
+* `.newton` — `newtonBasis`. Reznick's half-Newton-polytope. Sound
+  pruning for unconstrained σ₀; in the Putinar setting it can
+  over-prune (σ₀ may need to absorb cancellations against `σᵢ·gᵢ`
+  whose Newton extends past `½·Newton(target)`), which the `.dense`
+  fallback covers. -/
 inductive BasisStrategy where
   | dense
-  | dominance
   | newton
   deriving Inhabited, DecidableEq, Repr
 
@@ -221,7 +192,6 @@ def basisAt (s : BasisStrategy) (target : CMvPolynomial n ℚ)
     (deg : Nat) : Array (CMvMonomial n) :=
   match s with
   | .dense => monomialsUpTo n deg
-  | .dominance => supportDominanceBasis target deg
   | .newton => newtonBasis target deg
 
 end BasisStrategy
@@ -281,12 +251,11 @@ basis degree and to every σᵢ multiplier basis degree, growing each
 Gram matrix accordingly. `extraDeg = 0` is the original fixed-level
 encoding; iterative-deepening drivers loop `extraDeg = 0, 1, …`.
 
-`strategy` selects the σ₀ basis: `.dense` (default, complete),
-`.dominance` (support-dominance heuristic from #17), or `.newton`
-(half-Newton-polytope from Reznick — sound pruning via exact-rational
-LP). The pruning is only applied to σ₀ — constraint multipliers σᵢ
-have no analogous heuristic. The deepening driver is responsible for
-falling back to `.dense` if a pruned attempt fails. -/
+`strategy` selects the σ₀ basis: `.dense` (complete, default) or
+`.newton` (half-Newton-polytope from Reznick — sound pruning via
+exact-rational LP). The pruning is only applied to σ₀ — constraint
+multipliers σᵢ have no analogous heuristic. The deepening driver is
+responsible for falling back to `.dense` if a pruned attempt fails. -/
 def buildBlocks (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := []) (extraDeg : Nat := 0)
@@ -788,11 +757,11 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   -- `target = -1` and the support of `target` carries no information
   -- about which σ₀ basis monomials can appear. The fallback to
   -- `.dense` before bumping `extraDeg` is mandatory for completeness
-  -- — both Reznick (half-Newton) and support-dominance pass only
-  -- necessary conditions; they hold for *unconstrained* `σ₀`. In the
-  -- Putinar setting `target = σ₀ + Σ σᵢ·gᵢ`, σ₀ can absorb
-  -- cancellations against terms whose Newton polytope extends past
-  -- `½·Newton(target)`, so `.dense` is the safety net.
+  -- — Reznick's half-Newton condition is only necessary for
+  -- *unconstrained* σ₀; in the Putinar setting `target = σ₀ + Σ
+  -- σᵢ·gᵢ`, σ₀ can absorb cancellations against terms whose Newton
+  -- polytope extends past `½·Newton(target)`, so `.dense` is the
+  -- safety net.
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
   let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
