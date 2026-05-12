@@ -447,11 +447,11 @@ old `[1..31] ++ [2^5..2^20]` schedule missed.
 Harrison's HOL Light caps at `2^66`; we cap at `2^20`. Beyond that
 range, CSDP rounding noise produces tiny positive `LDL` pivots whose
 `fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
-practical wall time. `sos.maxRoundingDenom` (see `SOS/Tactic.lean`)
-filters the *full* candidate list — schedule entries, `polyDenom target`,
-constraint denoms, and cross denoms — against the cap; the schedule
-itself still tops out at `2^20`. Targets needing a strictly larger
-denom fall through to `sos_witness <hand-cert>`. -/
+practical wall time. The `maxRoundingDenom` field of `SOS.Config` (see
+`SOS/Tactic.lean`) filters the *full* candidate list — schedule entries,
+`polyDenom target`, constraint denoms, and cross denoms — against the
+cap; the schedule itself still tops out at `2^20`. Targets needing a
+strictly larger denom fall through to `sos_witness <hand-cert>`. -/
 def niceDenominators : List ℚ :=
   let smalls : List ℚ := (List.range 63).map (fun i => (i + 1 : ℚ))
   -- For k = 6..19, alternate `2^k` and `3·2^(k-1) = 1.5·2^k`; then `2^20`.
@@ -576,8 +576,9 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
 /-- Try a single SDP encoding (one choice of `useTraceCost` and one
 `extraDeg` relaxation level) and the denominator schedule. Candidates
 are filtered against `maxRoundingDenom` (default `2^20`); raise it via
-the `sos.maxRoundingDenom` option for targets whose Gram needs a
-larger denom. Returns `none` if CSDP fails or no rounding validates. -/
+the tactic-surface `Config.maxRoundingDenom` field for targets whose
+Gram needs a larger denom. Returns `none` if CSDP fails or no rounding
+validates. -/
 private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (useTraceCost : Bool) (extraDeg : Nat)
@@ -619,17 +620,19 @@ The equality list `ps` may be empty.
 
 Iteratively deepens the relaxation level: starts at `extraDeg = 0`
 (the original fixed encoding) and grows σ₀ and each σᵢ basis by 1
-monomial-degree per retry, up to `maxDepth` (default 3). Harrison's
-`REAL_SOS` reports needing depth as high as 12 for some examples; we
-cap at 3 by default and expose `sos.maxDepth` for the tactic surface.
-Each level is a full fresh CSDP solve — CSDP exposes no warm starts.
+monomial-degree per retry, up to `maxDepth` (default 0 — no
+deepening). Harrison's `REAL_SOS` reports needing depth as high as
+12; each level is a full fresh CSDP solve (CSDP has no warm starts)
+and the SDP grows combinatorially with the basis, so the failure path
+is `(maxDepth+1) × strategies` CSDP solves. Opt in per call via
+`sos (config := { maxDepth := k })`.
 
-`maxRoundingDenom` caps the denominator schedule (default `2^20`;
-raise via `sos.maxRoundingDenom`). -/
+`maxRoundingDenom` caps the denominator schedule (default `2^20`).
+Same config struct on the tactic side. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (maxRoundingDenom : Nat := 1048576)
-    (maxDepth : Nat := 3) : IO (Option (Certificate n)) := do
+    (maxDepth : Nat := 0) : IO (Option (Certificate n)) := do
   -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
   -- HOL Light convention) but interacts badly with infeasibility
@@ -687,7 +690,7 @@ Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
 window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
-    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 3) :
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0) :
     IO (Option (StrictResult n)) := do
   -- Iteratively deepen alongside `runFeasibilitySearch`: each outer
   -- pass re-runs the LP-slack solve at the higher relaxation. Each
@@ -742,7 +745,7 @@ here is a defensive `none` for direct callers (the tactic surface
 routes `.strict` goals straight to `runStrict`). -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := [])
-    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 3) :
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0) :
     IO (Option (Certificate n)) := do
   match goal with
   | .closed p   => runFeasibilitySearch p gs ps goal maxRoundingDenom maxDepth
