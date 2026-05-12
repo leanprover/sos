@@ -195,10 +195,18 @@ structure ConstraintInfo where
 
 /-- Reified conclusion: untyped polynomial AST plus the original
 ℝ-valued side of the user's `0 ≤ p` / `0 < p` goal. Bundled together
-because they're both present iff the conclusion isn't `False`. -/
+because they're both present iff the conclusion isn't `False`.
+
+When the user's goal is the general shape `a ≤ b` / `a < b` (rather
+than `0 ≤ b` / `0 < b`), the reifier rewrites it as `0 ≤ b − a` /
+`0 < b − a`: `orig` is the difference `b − a` and `useSubBridge` is
+`true`, signalling to the closing path that it must wrap the recovered
+`0 ≤ b − a` / `0 < b − a` proof with `le_of_sub_nonneg` /
+`lt_of_sub_pos` to match the user goal. -/
 structure ParsedConcl where
   raw  : SOS.Poly.Raw
   orig : Lean.Expr
+  useSubBridge : Bool := false
 
 /-- Output of `parseGoalAtomic`. The reified polynomials are kept as
 untyped `SOS.Poly.Raw`; the elaborator casts them to `SOS.Poly n` at
@@ -324,20 +332,38 @@ where
       Tactic.TacticM (Option ParsedGoal) := do
     let goalType ← whnfR goalType
     match_expr goalType with
-    | LE.le _ _ a b =>
-      let some r ← ratLit? a | return none
-      unless r = 0 do return none
-      let some (raw, atoms') ← tryReify b atoms | return none
+    | LE.le α _ a b =>
+      -- Only ℝ-valued inequalities are in the supported fragment;
+      -- the lift pre-pass converts ℕ/ℤ/ℚ goals before we get here.
+      unless (← Meta.isDefEq α (Lean.mkConst ``Real)) do return none
+      -- Fast path: `0 ≤ b` matches the canonical reified form directly.
+      if let some r ← ratLit? a then
+        if r = 0 then
+          let some (raw, atoms') ← tryReify b atoms | return none
+          return some
+            { atoms := atoms', shape := .closed,
+              concl := some { raw, orig := b }, constraints }
+      -- General `a ≤ b`: reify `b − a` and use the sub-bridge.
+      let diff ← Meta.mkAppM ``HSub.hSub #[b, a]
+      let some (raw, atoms') ← tryReify diff atoms | return none
       return some
         { atoms := atoms', shape := .closed,
-          concl := some { raw, orig := b }, constraints }
-    | LT.lt _ _ a b =>
-      let some r ← ratLit? a | return none
-      unless r = 0 do return none
-      let some (raw, atoms') ← tryReify b atoms | return none
+          concl := some { raw, orig := diff, useSubBridge := true },
+          constraints }
+    | LT.lt α _ a b =>
+      unless (← Meta.isDefEq α (Lean.mkConst ``Real)) do return none
+      if let some r ← ratLit? a then
+        if r = 0 then
+          let some (raw, atoms') ← tryReify b atoms | return none
+          return some
+            { atoms := atoms', shape := .strict,
+              concl := some { raw, orig := b }, constraints }
+      let diff ← Meta.mkAppM ``HSub.hSub #[b, a]
+      let some (raw, atoms') ← tryReify diff atoms | return none
       return some
         { atoms := atoms', shape := .strict,
-          concl := some { raw, orig := b }, constraints }
+          concl := some { raw, orig := diff, useSubBridge := true },
+          constraints }
     | False =>
       return some
         { atoms, shape := .infeasible, concl := none, constraints }
