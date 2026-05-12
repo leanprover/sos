@@ -253,3 +253,35 @@ example : True := by
 -- certify globally; the default `maxDepth := 1` finds that certificate.
 example (x y : ℝ) (_h : x*y = 1) :
     0 ≤ x^2 + y^2 - x*y*(x + y) := by sos
+
+/-! ### Negate-and-refute path (Harrison's `INT_SOS` trick)
+
+ℕ/ℤ goals whose polynomial inequality is *not* a Putinar consequence of
+the constraints over ℝ — they hold only because the variables are
+restricted to the integer points of the cone. The lift pre-pass tries
+the direct Putinar path first; on failure it negates the conclusion,
+applies the integer discreteness rewrite `¬ (a ≤ b) ⟺ b + 1 ≤ a`, and
+hands the resulting system to the existing `.infeasible` SOS arm. See
+`SOS.Lift.refuteToReal` and `sos.ml:1336`. -/
+
+-- sos.ml:1728 — Harrison's canonical example for `INT_SOS`. The
+-- Putinar relaxation over ℝ fails: at `n = 0.5` (admissible, `n ≥ 0`)
+-- the polynomial `n² − n = −0.25 < 0`. Refute path finds the rational
+-- infeasibility cert `(5·↑n − 3)²/16 + (5/16)·↑n + (25/16)·(↑n − ↑n² −
+-- 1) = −1`.
+example : ∀ n : ℕ, n ≤ n * n := by sos
+
+-- ℤ analogue with explicit non-negativity precondition.
+example : ∀ n : ℤ, 0 ≤ n → n ≤ n * n := by sos
+
+-- ℕ with a strict precondition `0 < n`. The discreteness rewrite
+-- applied at every hypothesis turns `0 < n` into `1 ≤ n`; the
+-- `0 ≤ ↑n` fact from `Nat.cast_nonneg` carries the search.
+example : ∀ n : ℕ, 0 < n → n ≤ n * n := by sos
+
+-- Control: the inequality goes the other way for almost all `n`,
+-- so the search shouldn't find a refutation certificate.
+example : True := by
+  fail_if_success
+    (have : ∀ n : ℕ, n * n ≤ n := by sos)
+  trivial

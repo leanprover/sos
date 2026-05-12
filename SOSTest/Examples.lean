@@ -168,6 +168,14 @@ example : ∀ n : ℕ, n < n + 1 := by sos
 -- the antisymmetric split both subgoals reduce to `0 ≤ 0`.
 example : ∀ m n : ℕ, 2*m + n = (n + m) + m := by sos
 
+-- ℕ-discreteness via the negate-and-refute path (Harrison's `INT_SOS`,
+-- `sos.ml:1728`). At `n := 0.5`, `n*n − n = −0.25 < 0`, so this is not
+-- in the quadratic module of `{n ≥ 0}` over `ℝ[n]` and the direct
+-- Putinar path fails. `runSosWithLift` then negates the conclusion,
+-- applies `Nat.lt_iff_add_one_le`, and finds the infeasibility cert
+-- `(5↑n − 3)²/16 + (5/16)·↑n + (25/16)·(↑n − ↑n² − 1) = −1`.
+example : ∀ n : ℕ, n ≤ n * n := by sos
+
 /-! ## §8. `sos?` — inspect, then pin the witness
 
 `sos?` runs the search and prints a `Try this:` suggestion of an

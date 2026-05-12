@@ -609,23 +609,83 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
       let hεProof ← buildStrictHεProof εE
       withFoundCert res.cert (.strict εE hεProof) (some res.ε)
 
-/-- Run the lift pre-pass, then the SOS pipeline. The pre-pass may
-produce multiple subgoals (e.g. from an `Eq` conclusion split via
-`le_antisymm`), or close some subgoals outright (e.g. `n < n+1` over
-ℕ becomes `n+1 ≤ n+1` and the rewrite step closes it reflexively).
-Each surviving subgoal is parsed and closed independently. -/
-private def runSosWithLift (cfg : Config) (suggest? : Option Syntax)
+/-- Detect whether the *original* goal (before any lift / refute step)
+has a ℕ/ℤ ≤/</= conclusion at its head after stripping leading binders.
+This is the syntactic precondition for the negate-and-refute fallback. -/
+private partial def isDiscreteIneqGoal : TacticM Bool := withMainContext do
+  let mv ← getMainGoal
+  let rec go (e : Expr) : MetaM Bool := do
+    let e ← whnfR e
+    match e with
+    | .forallE _ _ body _ => go body
+    | _ =>
+      match_expr e with
+      | LE.le α _ _ _ =>
+        match ← SOS.Lift.domainOf? α with
+        | some .nat | some .int => return true
+        | _ => return false
+      | LT.lt α _ _ _ =>
+        match ← SOS.Lift.domainOf? α with
+        | some .nat | some .int => return true
+        | _ => return false
+      | Eq α _ _ =>
+        match ← SOS.Lift.domainOf? α with
+        | some .nat | some .int => return true
+        | _ => return false
+      | _ => return false
+  go (← mv.getType >>= instantiateMVars)
+
+/-- Drive parse + search on every open goal. Used by both the direct
+and refute arms of `runSosWithLift`. -/
+private def parseAndSearchAll (cfg : Config) (suggest? : Option Syntax)
     (tag : String) : TacticM Unit := do
-  SOS.Lift.liftToReal
   let goals ← getGoals
   for g in goals do
-    -- Skip goals the lift pre-pass already closed.
     if ← g.isAssigned then continue
     setGoals [g]
     let some parsed ← SOS.Reify.parseGoalAtomic |
       throwError "{tag}: goal not in supported fragment"
     runSosTactic parsed cfg suggest? tag
   setGoals []
+
+/-- Run the lift pre-pass, then the SOS pipeline. The pre-pass may
+produce multiple subgoals (e.g. from an `Eq` conclusion split via
+`le_antisymm`), or close some subgoals outright (e.g. `n < n+1` over
+ℕ becomes `n+1 ≤ n+1` and the rewrite step closes it reflexively).
+Each surviving subgoal is parsed and closed independently.
+
+For ℕ/ℤ ≤/</= goals where the direct path fails (no Putinar certificate
+over ℝ — e.g. `n ≤ n*n`, which is false at `n = 0.5`), we restore the
+pre-lift state and retry on the negate-and-refute branch (Harrison's
+`INT_SOS` trick), which routes through the existing `.infeasible` SOS
+arm. See `SOS.Lift.refuteToReal`. -/
+private def runSosWithLift (cfg : Config) (suggest? : Option Syntax)
+    (tag : String) : TacticM Unit := do
+  let canRefute ← isDiscreteIneqGoal
+  if canRefute then
+    -- Try the direct path first; on any failure, restore and retry on
+    -- the refute branch. This mirrors the dense-fallback pattern in
+    -- `runSearch`: the direct path is cheaper for goals that *are*
+    -- Putinar-certifiable; the refute branch only earns its keep on
+    -- discreteness-dependent goals.
+    let st ← saveState
+    try
+      SOS.Lift.liftToReal
+      parseAndSearchAll cfg suggest? tag
+    catch direct =>
+      -- Trace the direct-path failure under `sos.lift` for debuggability:
+      -- the catch is intentionally broad (any failure shape — search
+      -- miss, reify rejection, lift error — falls through to refute), so
+      -- a stray bug in the direct arm would otherwise be hidden by a
+      -- successful refute. If refute also fails, its exception
+      -- propagates and the user sees the second-stage error.
+      trace[sos.lift] "direct path failed; trying refute: {direct.toMessageData}"
+      st.restore
+      SOS.Lift.refuteToReal
+      parseAndSearchAll cfg suggest? tag
+  else
+    SOS.Lift.liftToReal
+    parseAndSearchAll cfg suggest? tag
 
 elab_rules : tactic
   | `(tactic| sos $cfg:optConfig) => do
