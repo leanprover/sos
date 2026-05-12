@@ -1,6 +1,8 @@
 /-
 Speed-test candidate set. Build target is wall-clock < 60s for the
-whole file on the kim-em/sos main toolchain.
+whole file on the kim-em/sos main toolchain. The 1879 Zeng example
+runs with `sos (config := { maxDepth := 3 })` and contributes ~15s of
+CSDP wall-clock; every other example uses the default depth of 0.
 -/
 import SOS
 
@@ -169,13 +171,12 @@ ported here.
 
 Examples flagged with `-- FIXME` were verified by hand-running each
 through `by sos` in isolation; they're within the supported fragment
-but don't currently produce a certificate. The cause is almost always
-the absence of iterative deepening (README "Single fixed relaxation
-level"): the multiplier basis is fixed at `⌈D/2⌉` from the polynomial
-degrees, and Harrison's REAL_SOS bumps this on failure. A few of the
-multivariate direct-SOS failures (1819, 1805, 1832, …) likely also
-need Newton-polytope monomial pruning to land on a Gram matrix that
-rounds back to PSD. -/
+but don't currently produce a certificate. Iterative deepening (opt
+in via `sos (config := { maxDepth := k })`) recovers some — see 1879
+below — but several FIXMEs still resist: the deepened SDP either
+fails to converge or returns a Gram that doesn't round to PSD. These
+need Newton-polytope monomial pruning (issue #17), preordering-style
+encodings, or both, on top of deepening. -/
 
 /-! #### Direct SOS, no hypotheses (Harrison's `SOS_CONV` / `PURE_SOS`) -/
 
@@ -280,13 +281,16 @@ example (x y z w : ℝ) :
 --     0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
 --         + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
 
--- FIXME sos.ml:1879 — Harrison's flagged hard Zeng case. He notes
+-- sos.ml:1879 — Harrison's flagged hard Zeng case. Harrison notes
 -- "REAL_SOS does finally converge on the second run at level 12";
--- requires iterative deepening.
--- example (x y z : ℝ) :
---     0 ≤ x^4*y^4 - 2*x^5*y^3*z^2 + x^6*y^2*z^4
---         + 2*x^2*y^3*z - 4*x^3*y^2*z^3 + 2*x^4*y*z^5
---         + z^2*y^2 - 2*z^4*y*x + z^6*x^2 := by sos
+-- our iterative deepening closes it at level 3 (we opt in here via
+-- the per-call `config`; the default `maxDepth = 0` keeps the
+-- failure path cheap on the other examples).
+example (x y z : ℝ) :
+    0 ≤ x^4*y^4 - 2*x^5*y^3*z^2 + x^6*y^2*z^4
+        + 2*x^2*y^3*z - 4*x^3*y^2*z^3 + 2*x^4*y*z^5
+        + z^2*y^2 - 2*z^4*y*x + z^6*x^2 := by
+  sos (config := { maxDepth := 3 })
 
 /-! #### REAL_SOS with Putinar-style hypotheses -/
 
@@ -294,19 +298,29 @@ example (x y z w : ℝ) :
 example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
     0 ≤ (x^2 + y^2)^2 - x*y*(x + y)^2 := by sos
 
--- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The
--- certificate `(x-1)(y-1)` requires σ₁ = (x-1) which is not SOS;
--- the next relaxation level (with degree-2 σᵢ) suffices but our
--- search has no iterative deepening.
+-- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The natural
+-- certificate is `(x-1)(y-1) = 1·g₁·g₂`, i.e. a *product* of the two
+-- inequality multipliers — a preordering term, not a quadratic-module
+-- term `σ₀ + Σ σᵢ·gᵢ`. Iterative deepening (any `maxDepth`) grows σᵢ
+-- but doesn't add product terms `σᵢⱼ·gᵢ·gⱼ`, so the search stays
+-- infeasible. Cure is preordering-style (Schmüdgen) encoding.
 -- example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
 --     0 ≤ x*y - (x + y - 1) := by sos
 
--- FIXME sos.ml:1657 — strict version of the above; same root cause.
+-- FIXME sos.ml:1657 — strict version of the above. The closed
+-- inequality is tight at `x = y = 1` (boundary of `x ≥ 1, y ≥ 1`),
+-- so the strict inequality has no uniform ε slack; even with a
+-- preordering encoding `runStrict` would have to keep ε bounded
+-- away from the constraint boundary, which the LP-slack solve
+-- doesn't enforce.
 -- example (x y : ℝ) (_hx : 0 < x - 1) (_hy : 0 < y - 1) :
 --     0 < x*y - (x + y - 1) := by sos
 
 -- FIXME sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`.
--- Putinar form needs degree-2 multipliers on the linear hypotheses.
+-- Putinar form needs degree-2 multipliers on the linear hypotheses;
+-- raising `maxDepth` grows the basis but CSDP still can't round to
+-- a valid Gram at any depth I've tried. Likely needs basis pruning
+-- (#17).
 -- example (x y z : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_hz : 0 ≤ z)
 --     (_hs : x + y + z - 3 ≤ 0) :
 --     0 ≤ x*y + x*z + y*z - 3*x*y*z := by sos
@@ -476,14 +490,15 @@ example : True := by
 
 -- sos.ml:1629 — discriminant: `a·x²+b·x+c = 0 → 0 ≤ b² − 4ac`.
 -- Identity: `b² − 4ac = (2ax + b)² + (−4a)·(ax² + bx + c)`. The
--- cofactor `−4a` has degree 1, but the search's current cofactor-basis
--- bound is `σ₀Deg − deg(p) = 2 − 2 = 0`, so `by sos` only explores
--- constant cofactors and fails here. Iterative deepening (issue #16)
--- would let `by sos` find this. Until then we provide the witness:
--- empirically the parser's atom order is `b, a, c, x` (b is first
--- because the conclusion `b² − 4ac` is walked left-to-right; b gets
--- index 0, a index 1, c index 2; x is new from the hypothesis at
--- index 3).
+-- cofactor `−4a` has degree 1; with `sos (config := { maxDepth := 1 })`
+-- the cofactor basis is wide enough and `by sos` does find a
+-- certificate — but the search takes ~2.5 minutes of CSDP time, well
+-- past the speed-test budget. We keep the witness here so the file
+-- stays fast; switch to `by sos (config := { maxDepth := 1 })` once
+-- basis pruning (#17) brings the cost down. Atom order: `b, a, c, x`
+-- (b is first because the conclusion `b² − 4ac` is walked left-to-
+-- right; b gets index 0, a index 1, c index 2; x is new from the
+-- hypothesis at index 3).
 example (a b c x : ℝ) (_h : a*x^2 + b*x + c = 0) :
     0 ≤ b^2 - 4*a*c := by
   sos_witness

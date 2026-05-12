@@ -9,6 +9,7 @@ import SOS.Search
 import SOS.Verifier
 import Lean.ToExpr
 import Lean.Elab.Tactic
+import Lean.Elab.Tactic.Config
 import Lean.Meta.Tactic.TryThis
 import Mathlib.Tactic.Ring
 import Mathlib.Tactic.NormNum
@@ -17,17 +18,25 @@ namespace SOS
 
 open Lean Elab Tactic Meta
 
-/-- Upper bound on rounding-denominator candidates filtered against
-the schedule. The fixed schedule (`SOS.Search.niceDenominators`) tops
-out at `2^20`; this cap also gates `polyDenom target`, constraint and
-equality denoms, and the cross-product denoms `polyDenom (target * gᵢ)`.
-Raise it (`set_option sos.maxRoundingDenom 16777216`) for targets whose
-`polyDenom` exceeds `2^20`; lower it to fail faster on goals you
-already know aren't going to round cleanly. -/
-register_option sos.maxRoundingDenom : Nat := {
-  defValue := 1048576
-  descr := "Maximum denominator tried during SOS rational rounding."
-}
+/-- Per-call configuration for the `sos` / `sos?` tactics. Pass as
+`sos (config := { maxDepth := 3 })` or omit the clause to use defaults.
+
+* `maxDepth` — iterative-deepening cap. At each `extraDeg ∈ [0..maxDepth]`
+  the σ₀ and σᵢ bases grow by one monomial degree. Harrison's `REAL_SOS`
+  reports needing depth up to 12; each level is a fresh CSDP solve and
+  scales combinatorially with the basis, so the default `0` keeps
+  failure paths cheap. Raise for hard targets.
+* `maxRoundingDenom` — upper cap on rounding-denominator candidates
+  filtered against `SOS.Search.niceDenominators` (which itself tops out
+  at `2^20`). Raise for targets whose `polyDenom` exceeds the cap;
+  lower to fail faster on goals you know won't round cleanly. -/
+structure Config where
+  maxDepth : Nat := 0
+  maxRoundingDenom : Nat := 1048576
+  deriving Inhabited
+
+/-- Elaborator for `(config := …)` clauses on `sos`/`sos?`. -/
+declare_config_elab elabConfig Config
 
 /-! ### Common Expr fragments -/
 
@@ -375,8 +384,8 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
 
 /-! ### Tactic surface -/
 
-syntax (name := sosTactic) "sos" : tactic
-syntax (name := sosTryTactic) "sos?" : tactic
+syntax (name := sosTactic) "sos" Lean.Parser.Tactic.optConfig : tactic
+syntax (name := sosTryTactic) "sos?" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosWitnessTactic)
   "sos_witness " term ("with" "ε" ":=" term)? : tactic
 
@@ -534,7 +543,7 @@ private def emitSosSuggestion (tk : Syntax) (certText : String)
 goal, optionally emits a `Try this:` suggestion at `suggest?`, and
 closes the goal with the resulting certificate. The error-message
 prefix (`"sos"` vs `"sos?"`) is taken from `tag`. -/
-private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
+private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
     (suggest? : Option Syntax) (tag : String) : TacticM Unit := do
   let n := parsed.atoms.size
   let (gPolys, pPolys) ← castConstraints parsed.constraints n
@@ -547,24 +556,25 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
       emitSosSuggestion tk (formatDecompiledCertificate decompiled) ε?
     let certE ← certExprOfDecompiled n decompiled
     closeSos parsed certE mode
-  let maxDenom := sos.maxRoundingDenom.get (← getOptions)
+  let maxDenom := cfg.maxRoundingDenom
+  let maxDepth := cfg.maxDepth
   match parsed.shape with
   | .closed =>
     let p ← parsedConclusionData s!"{tag} (closed)" parsed n
     let goal : SOS.Goal n := .closed p.tree.toCMv
-    match (← (SOS.Search.runSearch goal gsCMv psCMv (maxRoundingDenom := maxDenom) :
-        IO _)) with
+    match (← (SOS.Search.runSearch goal gsCMv psCMv
+        (maxRoundingDenom := maxDenom) (maxDepth := maxDepth) : IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
     | some cert => withFoundCert cert .closed none
   | .infeasible =>
     match (← (SOS.Search.runSearch .infeasible gsCMv psCMv
-        (maxRoundingDenom := maxDenom) : IO _)) with
+        (maxRoundingDenom := maxDenom) (maxDepth := maxDepth) : IO _)) with
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
     match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv
-        (maxRoundingDenom := maxDenom) : IO _)) with
+        (maxRoundingDenom := maxDenom) (maxDepth := maxDepth) : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε
@@ -572,16 +582,18 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
       withFoundCert res.cert (.strict εE hεProof) (some res.ε)
 
 elab_rules : tactic
-  | `(tactic| sos) => do
+  | `(tactic| sos $cfg:optConfig) => do
+    let cfg ← elabConfig cfg
     let some parsed ← SOS.Reify.parseGoalAtomic |
       throwError "sos: goal not in supported fragment"
-    runSosTactic parsed none "sos"
+    runSosTactic parsed cfg none "sos"
 
 elab_rules : tactic
-  | `(tactic| sos?%$tk) => do
+  | `(tactic| sos?%$tk $cfg:optConfig) => do
+    let cfg ← elabConfig cfg
     let some parsed ← SOS.Reify.parseGoalAtomic |
       throwError "sos?: goal not in supported fragment"
-    runSosTactic parsed (some tk) "sos?"
+    runSosTactic parsed cfg (some tk) "sos?"
 
 /-- Shared body of `sos_witness` (with and without the `with ε := …`
 suffix). Elaborates the certificate, dispatches on the parsed goal

@@ -145,16 +145,22 @@ list. Block 0 is σ₀ (multiplier = 1); block i+1 is σᵢ (multiplier = gᵢ).
 The `ps` argument provides equality polynomials whose total degree
 participates in σ₀ sizing — `target = σ₀ + Σᵢ σᵢ·gᵢ + Σⱼ qⱼ·pⱼ` may
 need σ₀ to absorb cancellations against `qⱼ·pⱼ` of degree close to
-`σ₀Deg`. -/
+`σ₀Deg`.
+
+`extraDeg` raises the relaxation level: it is added to both the σ₀
+basis degree and to every σᵢ multiplier basis degree, growing each
+Gram matrix accordingly. `extraDeg = 0` is the original fixed-level
+encoding; iterative-deepening drivers loop `extraDeg = 0, 1, …`. -/
 def buildBlocks (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ))
-    (ps : List (CMvPolynomial n ℚ) := []) : Array (BlockSpec n) := Id.run do
+    (ps : List (CMvPolynomial n ℚ) := []) (extraDeg : Nat := 0) :
+    Array (BlockSpec n) := Id.run do
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
   let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
   let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
   let mut blocks : Array (BlockSpec n) := #[]
-  let σ₀Basis := monomialsUpTo n (halfCeil σ₀Deg)
+  let σ₀Basis := monomialsUpTo n (halfCeil σ₀Deg + extraDeg)
   let σ₀Basis :=
     if target.coeff (zeroMono n) = 0 then
       σ₀Basis.filter (fun m => m ≠ zeroMono n)
@@ -162,7 +168,7 @@ def buildBlocks (target : CMvPolynomial n ℚ)
   blocks := blocks.push { basis := σ₀Basis, multiplier := CMvPolynomial.C 1 }
   for g in gs do
     let gDeg := g.totalDegree
-    let basisDeg := multiplierBasisDeg σ₀Deg gDeg
+    let basisDeg := multiplierBasisDeg σ₀Deg gDeg + extraDeg
     let basis := monomialsUpTo n basisDeg
     let basis := if basis.size == 0 then monomialsUpTo n 0 else basis
     blocks := blocks.push { basis := basis, multiplier := g }
@@ -170,10 +176,13 @@ def buildBlocks (target : CMvPolynomial n ℚ)
 
 /-- Build per-equality cofactor specs. The cofactor basis for `pⱼ` has
 degree `cofactorBasisDeg σ₀Deg deg(pⱼ)`, computed against the same
-`σ₀Deg` that drives `buildBlocks`. -/
+`σ₀Deg` that drives `buildBlocks`. `extraDeg` mirrors `buildBlocks`'
+iterative-deepening parameter: a relaxation that grows σ₀ by `extraDeg`
+in basis (i.e. by `2 * extraDeg` in polynomial degree) needs the
+matching headroom on each cofactor `qⱼ`. -/
 def buildEqCofactorSpecs (target : CMvPolynomial n ℚ)
-    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ)) :
-    Array (EqCofactorSpec n) := Id.run do
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
+    (extraDeg : Nat := 0) : Array (EqCofactorSpec n) := Id.run do
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
   let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
@@ -181,7 +190,7 @@ def buildEqCofactorSpecs (target : CMvPolynomial n ℚ)
   let mut specs : Array (EqCofactorSpec n) := #[]
   for p in ps do
     let pDeg := p.totalDegree
-    let cofDeg := cofactorBasisDeg σ₀Deg pDeg
+    let cofDeg := cofactorBasisDeg σ₀Deg pDeg + 2 * extraDeg
     let basis := monomialsUpTo n cofDeg
     let basis := if basis.size == 0 then monomialsUpTo n 0 else basis
     specs := specs.push { basis, eqPoly := p }
@@ -270,11 +279,12 @@ two diagonal LP blocks of width `Σⱼ |basisⱼ|`. Trace cost gives these
 blocks zero weight — otherwise the objective drives `x⁺` and `x⁻` to
 infinity together. -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
-    (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := []) :
+    (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := [])
+    (extraDeg : Nat := 0) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
       Array (CMvMonomial n) × Option Nat :=
-  let σBlocks := buildBlocks target gs ps
-  let eqSpecs := buildEqCofactorSpecs target gs ps
+  let σBlocks := buildBlocks target gs ps extraDeg
+  let eqSpecs := buildEqCofactorSpecs target gs ps extraDeg
   let hasEqs := !ps.isEmpty
   let cumOffsets : Array Nat := Id.run do
     let mut offsets : Array Nat := #[]
@@ -437,11 +447,11 @@ old `[1..31] ++ [2^5..2^20]` schedule missed.
 Harrison's HOL Light caps at `2^66`; we cap at `2^20`. Beyond that
 range, CSDP rounding noise produces tiny positive `LDL` pivots whose
 `fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
-practical wall time. `sos.maxRoundingDenom` (see `SOS/Tactic.lean`)
-filters the *full* candidate list — schedule entries, `polyDenom target`,
-constraint denoms, and cross denoms — against the cap; the schedule
-itself still tops out at `2^20`. Targets needing a strictly larger
-denom fall through to `sos_witness <hand-cert>`. -/
+practical wall time. The `maxRoundingDenom` field of `SOS.Config` (see
+`SOS/Tactic.lean`) filters the *full* candidate list — schedule entries,
+`polyDenom target`, constraint denoms, and cross denoms — against the
+cap; the schedule itself still tops out at `2^20`. Targets needing a
+strictly larger denom fall through to `sos_witness <hand-cert>`. -/
 def niceDenominators : List ℚ :=
   let smalls : List ℚ := (List.range 63).map (fun i => (i + 1 : ℚ))
   -- For k = 6..19, alternate `2^k` and `3·2^(k-1) = 1.5·2^k`; then `2^20`.
@@ -563,17 +573,18 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
   if cert.checks goal gs ps then return some cert
   return none
 
-/-- Try a single SDP encoding (one choice of `useTraceCost`) and the
-denominator schedule. Candidates are filtered against `maxRoundingDenom`
-(default `2^20`); raise it via the `sos.maxRoundingDenom` option for
-targets whose Gram needs a larger denom. Returns `none` if CSDP fails
-or no rounding validates. -/
+/-- Try a single SDP encoding (one choice of `useTraceCost` and one
+`extraDeg` relaxation level) and the denominator schedule. Candidates
+are filtered against `maxRoundingDenom` (default `2^20`); raise it via
+the tactic-surface `Config.maxRoundingDenom` field for targets whose
+Gram needs a larger denom. Returns `none` if CSDP fails or no rounding
+validates. -/
 private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
-    (goal : Goal n) (useTraceCost : Bool)
+    (goal : Goal n) (useTraceCost : Bool) (extraDeg : Nat)
     (maxRoundingDenom : Nat := 1048576) : IO (Option (Certificate n)) := do
   let (problem, blocks, eqSpecs, _monos, _) :=
-    buildSdp target gs (.feasibility useTraceCost) ps
+    buildSdp target gs (.feasibility useTraceCost) ps extraDeg
   if problem.b.size = 0 then
     if target = 0 then
       return some { sigma0 := { squares := [] },
@@ -605,13 +616,23 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
 
 /-- Closed-positivity / infeasibility search: produce a Certificate
 proving `target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ` for the chosen `target`.
-The equality list `ps` may be empty. `maxRoundingDenom` caps the
-denominator schedule (default `2^20`; raise via the
-`sos.maxRoundingDenom` option from the tactic). -/
+The equality list `ps` may be empty.
+
+Iteratively deepens the relaxation level: starts at `extraDeg = 0`
+(the original fixed encoding) and grows σ₀ and each σᵢ basis by 1
+monomial-degree per retry, up to `maxDepth` (default 0 — no
+deepening). Harrison's `REAL_SOS` reports needing depth as high as
+12; each level is a full fresh CSDP solve (CSDP has no warm starts)
+and the SDP grows combinatorially with the basis, so the failure path
+is `(maxDepth+1) × strategies` CSDP solves. Opt in per call via
+`sos (config := { maxDepth := k })`.
+
+`maxRoundingDenom` caps the denominator schedule (default `2^20`).
+Same config struct on the tactic side. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
-    (goal : Goal n) (maxRoundingDenom : Nat := 1048576) :
-    IO (Option (Certificate n)) := do
+    (goal : Goal n) (maxRoundingDenom : Nat := 1048576)
+    (maxDepth : Nat := 0) : IO (Option (Certificate n)) := do
   -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
   -- HOL Light convention) but interacts badly with infeasibility
@@ -623,10 +644,11 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   let strategies : List Bool := match goal with
     | .infeasible => [false]
     | _           => [true, false]
-  for useTraceCost in strategies do
-    if let some cert ← tryOneSdp target gs ps goal useTraceCost maxRoundingDenom
-      then
-      return some cert
+  for extraDeg in [0:maxDepth + 1] do
+    for useTraceCost in strategies do
+      if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
+          maxRoundingDenom then
+        return some cert
   return none
 
 /-! ### Strict positivity via LP-slack maximisation
@@ -668,35 +690,52 @@ Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
 window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
-    (maxRoundingDenom : Nat := 1048576) :
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0) :
     IO (Option (StrictResult n)) := do
-  let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
-    buildSdp p gs .lpSlack ps
-  let some lambdaBlockIdx := lambdaBlockIdx? | return none
-  let sol := LeanCsdp.solve problem
-  if sol.ret ∉ [0, 3] then return none
-  let lambdaStar := readLambda sol lambdaBlockIdx
-  if lambdaStar ≤ 0.000000001 then return none
-  -- Find the smallest k such that 2^-k ≤ 2·λ*. The factor-2 slack
-  -- means CSDP returning `λ* = 0.999...` for a true optimum of 1
-  -- still starts at k = 0 (ε = 1).
-  let mut bound : Float := 1.0
-  let mut k : Nat := 0
-  while bound > 2.0 * lambdaStar do
-    bound := bound * 0.5
-    k := k + 1
-    if k > 25 then return none
-  -- Try ε = 2^-k, 2^-(k+1), ..., 2^-(k+7). Each is a power-of-two
-  -- denominator; the first that closes wins.
-  for j in [0:8] do
-    let denom : Nat := 2 ^ (k + j)
-    let ε : ℚ := 1 / (denom : ℚ)
-    if hε : 0 < ε then
-      let goal : Goal n := .strict p ε hε
-      let targetPoly := p - CMvPolynomial.C ε
-      match (← runFeasibilitySearch targetPoly gs ps goal maxRoundingDenom) with
-      | some cert => return some { cert, ε, hε }
-      | none => pure ()
+  -- Iteratively deepen alongside `runFeasibilitySearch`: each outer
+  -- pass re-runs the LP-slack solve at the higher relaxation. Each
+  -- LP-slack solve generally returns a different `λ*` (and thus a
+  -- different sweep of ε candidates), so the work isn't redundant
+  -- with earlier outer iterations. The inner feasibility call passes
+  -- `(maxDepth := extraDeg)`, which is one strictly larger than
+  -- necessary — it re-tries depths `0..extraDeg-1` on each `(ε,
+  -- extraDeg)` pair. Bounded redundancy; acceptable for the simpler
+  -- driver structure.
+  for extraDeg in [0:maxDepth + 1] do
+    let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
+      buildSdp p gs .lpSlack ps extraDeg
+    let some lambdaBlockIdx := lambdaBlockIdx? | return none
+    let sol := LeanCsdp.solve problem
+    if sol.ret ∉ [0, 3] then continue
+    let lambdaStar := readLambda sol lambdaBlockIdx
+    if lambdaStar ≤ 0.000000001 then continue
+    -- Find the smallest k such that 2^-k ≤ 2·λ*. The factor-2 slack
+    -- means CSDP returning `λ* = 0.999...` for a true optimum of 1
+    -- still starts at k = 0 (ε = 1).
+    let mut bound : Float := 1.0
+    let mut k : Nat := 0
+    let mut bail := false
+    while bound > 2.0 * lambdaStar do
+      bound := bound * 0.5
+      k := k + 1
+      if k > 25 then
+        bail := true
+        break
+    if bail then continue
+    -- Try ε = 2^-k, 2^-(k+1), ..., 2^-(k+7). Each is a power-of-two
+    -- denominator; the first that closes wins. Pass `extraDeg` as the
+    -- inner `maxDepth` cap so the inner search tries up to the same
+    -- relaxation as the LP-slack solve that produced `λ*`.
+    for j in [0:8] do
+      let denom : Nat := 2 ^ (k + j)
+      let ε : ℚ := 1 / (denom : ℚ)
+      if hε : 0 < ε then
+        let goal : Goal n := .strict p ε hε
+        let targetPoly := p - CMvPolynomial.C ε
+        match (← runFeasibilitySearch targetPoly gs ps goal maxRoundingDenom
+            (maxDepth := extraDeg)) with
+        | some cert => return some { cert, ε, hε }
+        | none => pure ()
   return none
 
 /-- Closed/infeasibility search dispatcher. Owns the `Goal → target`
@@ -706,11 +745,11 @@ here is a defensive `none` for direct callers (the tactic surface
 routes `.strict` goals straight to `runStrict`). -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := [])
-    (maxRoundingDenom : Nat := 1048576) :
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0) :
     IO (Option (Certificate n)) := do
   match goal with
-  | .closed p   => runFeasibilitySearch p gs ps goal maxRoundingDenom
-  | .infeasible => runFeasibilitySearch (-1) gs ps goal maxRoundingDenom
+  | .closed p   => runFeasibilitySearch p gs ps goal maxRoundingDenom maxDepth
+  | .infeasible => runFeasibilitySearch (-1) gs ps goal maxRoundingDenom maxDepth
   | .strict ..  => return none
 
 end SOS.Search
