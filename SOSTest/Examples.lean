@@ -597,17 +597,24 @@ Harrison `sos.ml:1725`. The conclusion is a pure rewrite identity, so
 after the antisymmetric split both subgoals reduce to `0 ≤ 0`. -/
 example : ∀ m n : ℕ, 2*m + n = (n + m) + m := by sos
 
-/-! #### Out-of-scope guards -/
+/-! #### Out-of-scope guards
+
+Both checks throw a specific error pointing the user at the workaround
+or the tracking issue. The asserted strings below pin those exact
+messages, so changing them is a deliberate UX choice rather than a
+silent drift. -/
 
 -- Truncated ℕ subtraction is refused with a hint.
-example : True := by
-  fail_if_success
-    (have : ∀ n : ℕ, n - 1 ≤ n := by sos)
-  trivial
+/--
+error: sos: `by sos` does not handle truncated ℕ subtraction in goals; cast to `Int.sub`, or rewrite via `Nat.sub_eq` with `m ≤ n` in context.
+-/
+#guard_msgs in
+example : ∀ n : ℕ, n - 1 ≤ n := by sos
 
 -- ℕ / ℤ division and modulo are refused (DIV / MOD support tracked
--- in #24).
-example : True := by
-  fail_if_success
-    (have : ∀ a b : ℕ, b ≠ 0 → a / b * b ≤ a := by sos)
-  trivial
+-- in https://github.com/kim-em/sos/issues/24).
+/--
+error: sos: `by sos` does not handle `Nat.div` / `Int.div`; DIV / MOD support is tracked in https://github.com/kim-em/sos/issues/24.
+-/
+#guard_msgs in
+example : ∀ a b : ℕ, b ≠ 0 → a / b * b ≤ a := by sos
