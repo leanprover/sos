@@ -689,10 +689,15 @@ def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
     (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 3) :
     IO (Option (StrictResult n)) := do
-  -- Iteratively deepen the same way `runFeasibilitySearch` does: each
-  -- pass re-runs the LP-slack solve at the higher relaxation and the
-  -- inner re-solve sweeps the ε candidates. `runFeasibilitySearch`
-  -- only sees the current `extraDeg`, so we don't redo its own loop.
+  -- Iteratively deepen alongside `runFeasibilitySearch`: each outer
+  -- pass re-runs the LP-slack solve at the higher relaxation. Each
+  -- LP-slack solve generally returns a different `λ*` (and thus a
+  -- different sweep of ε candidates), so the work isn't redundant
+  -- with earlier outer iterations. The inner feasibility call passes
+  -- `(maxDepth := extraDeg)`, which is one strictly larger than
+  -- necessary — it re-tries depths `0..extraDeg-1` on each `(ε,
+  -- extraDeg)` pair. Bounded redundancy; acceptable for the simpler
+  -- driver structure.
   for extraDeg in [0:maxDepth + 1] do
     let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
       buildSdp p gs .lpSlack ps extraDeg
@@ -715,9 +720,9 @@ def runStrict (p : CMvPolynomial n ℚ)
         break
     if bail then continue
     -- Try ε = 2^-k, 2^-(k+1), ..., 2^-(k+7). Each is a power-of-two
-    -- denominator; the first that closes wins. Reuse `extraDeg` for
-    -- the inner feasibility solve by capping `maxDepth` there: the
-    -- LP-slack and re-solve must agree on the relaxation level.
+    -- denominator; the first that closes wins. Pass `extraDeg` as the
+    -- inner `maxDepth` cap so the inner search tries up to the same
+    -- relaxation as the LP-slack solve that produced `λ*`.
     for j in [0:8] do
       let denom : Nat := 2 ^ (k + j)
       let ε : ℚ := 1 / (denom : ℚ)

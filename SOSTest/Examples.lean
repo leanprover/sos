@@ -296,15 +296,21 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
     0 ≤ (x^2 + y^2)^2 - x*y*(x + y)^2 := by sos
 
 -- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The natural
--- certificate `(x-1)(y-1)` requires σ₁ = (x-1) which is not SOS, and
--- iterative deepening alone (`sos.maxDepth`) doesn't recover it
--- — empirically the deepened SDP either fails to converge or rounds
--- to a non-PSD Gram. Likely needs Newton-polytope basis pruning
--- (issue #17) to land on a usable Gram at depth ≥ 1.
+-- certificate is `(x-1)(y-1) = 1·g₁·g₂`, i.e. a *product* of the two
+-- inequality multipliers — a preordering term, not a quadratic-module
+-- term `σ₀ + Σ σᵢ·gᵢ`. Iterative deepening grows σᵢ but doesn't add
+-- product terms `σᵢⱼ·gᵢ·gⱼ`, so the search stays infeasible at every
+-- depth. Cure is preordering-style encoding (Schmüdgen rather than
+-- Putinar), not just #17.
 -- example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
 --     0 ≤ x*y - (x + y - 1) := by sos
 
--- FIXME sos.ml:1657 — strict version of the above; same root cause.
+-- FIXME sos.ml:1657 — strict version of the above. The closed
+-- inequality is tight at `x = y = 1` (boundary of `x ≥ 1, y ≥ 1`),
+-- so the strict inequality has no uniform ε slack; even with a
+-- preordering encoding `runStrict` would have to keep ε bounded
+-- away from the constraint boundary, which the LP-slack solve
+-- doesn't enforce.
 -- example (x y : ℝ) (_hx : 0 < x - 1) (_hy : 0 < y - 1) :
 --     0 < x*y - (x + y - 1) := by sos
 
@@ -481,14 +487,14 @@ example : True := by
 
 -- sos.ml:1629 — discriminant: `a·x²+b·x+c = 0 → 0 ≤ b² − 4ac`.
 -- Identity: `b² − 4ac = (2ax + b)² + (−4a)·(ax² + bx + c)`. The
--- cofactor `−4a` has degree 1, but the search's current cofactor-basis
--- bound is `σ₀Deg − deg(p) = 2 − 2 = 0`, so `by sos` only explores
--- constant cofactors and fails here. Iterative deepening (issue #16)
--- would let `by sos` find this. Until then we provide the witness:
--- empirically the parser's atom order is `b, a, c, x` (b is first
--- because the conclusion `b² − 4ac` is walked left-to-right; b gets
--- index 0, a index 1, c index 2; x is new from the hypothesis at
--- index 3).
+-- cofactor `−4a` has degree 1; iterative deepening (issue #16) grows
+-- the cofactor basis enough that `by sos` does find a certificate at
+-- default depth — but the search takes ~2.5 minutes of CSDP time,
+-- well past the speed-test budget. We keep the witness here so the
+-- file stays fast; switch to `by sos` once basis pruning (#17) brings
+-- the cost down. Atom order: `b, a, c, x` (b is first because the
+-- conclusion `b² − 4ac` is walked left-to-right; b gets index 0,
+-- a index 1, c index 2; x is new from the hypothesis at index 3).
 example (a b c x : ℝ) (_h : a*x^2 + b*x + c = 0) :
     0 ≤ b^2 - 4*a*c := by
   sos_witness
