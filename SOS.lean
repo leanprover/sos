@@ -9,4 +9,5 @@ import SOS.LDL
 import SOS.RatSimplex
 import SOS.Search
 import SOS.Reify
+import SOS.Lift
 import SOS.Tactic

@@ -531,3 +531,78 @@ example : True := by
 -- and needs degree-≥-2 SOS work to certify globally).
 -- example (x y : ℝ) (_h : x*y = 1) :
 --     0 ≤ x^2 + y^2 - x*y*(x + y) := by sos
+
+/-! ### Lifting ℕ / ℤ / ℚ goals to ℝ
+
+The lift pre-pass in `SOS/Lift.lean` runs before `parseGoalAtomic`.
+It intros all leading ℕ / ℤ / ℚ / ℝ universal binders, splits equality
+conclusions via `le_antisymm`, rewrites ℕ / ℤ strict inequalities via
+`lt_iff_add_one_le`, applies the cast bridge (`Nat.cast_le.mp`, etc.)
+on the conclusion, runs `rify at *` to lift hypotheses, and adds a
+`0 ≤ (↑a : ℝ)` hypothesis for every ℕ-typed cast atom now appearing
+in the goal.
+
+The user-visible tactic name does not change — `by sos` auto-
+dispatches on the (in)equality type. Goals whose `(in)equalities are
+already over ℝ pay no overhead (the pre-pass is a no-op for them).
+
+DIV / MOD support is split out as #24; this PR refuses such goals
+with a hint pointing at that issue. ℕ subtraction is also out of
+scope. -/
+
+/-! #### General `a ≤ b` / `a < b` over ℝ (reifier extension only) -/
+
+-- Without the reifier extension, a goal like this would have required
+-- the user to rewrite manually to `0 ≤ b − a` first.
+example (x : ℝ) : x ≤ x^2 + x + 1 := by sos
+example (x : ℝ) : x < x^2 + x + 2 := by sos
+example (x : ℝ) : -(x^2 + 1) ≤ 0 := by sos
+
+/-! #### ℤ goals -/
+
+-- `(a − b)²  ≥ 0`.
+example (a b : ℤ) : 2*a*b ≤ a^2 + b^2 := by sos
+
+-- Schur over ℤ: `(a−b)² + (b−c)² + (a−c)² ≥ 0` divided by two.
+example (a b c : ℤ) : a*b + b*c + a*c ≤ a^2 + b^2 + c^2 := by sos
+
+/-! #### ℚ goals -/
+
+-- Strict over ℚ: routed through `Rat.cast_lt.mp` to the ℝ
+-- strict-positivity path.
+example (x : ℚ) : 0 < x^2 + 1 := by sos
+
+-- `(x² − y²)² ≥ 0`.
+example (x y : ℚ) : 4*x^2*y^2 ≤ (x^2 + y^2)^2 := by sos
+
+/-! #### Mixed ℕ + ℝ — ℕ binder lifted, ℝ atom preserved -/
+
+example : ∀ n : ℕ, ∀ x : ℝ, 0 ≤ x^2 + n := by sos
+
+/-! #### Strict ℕ via `Nat.lt_iff_add_one_le` -/
+
+-- `n < n+1` rewrites to `n+1 ≤ n+1`, which the rewrite step closes
+-- reflexively before the cast bridge is needed. The `runSosWithLift`
+-- driver detects the empty-goal state and exits cleanly.
+example : ∀ n : ℕ, n < n + 1 := by sos
+
+/-! #### ℕ equality via `le_antisymm` split
+
+Harrison `sos.ml:1725`. The conclusion is a pure rewrite identity, so
+after the antisymmetric split both subgoals reduce to `0 ≤ 0`. -/
+example : ∀ m n : ℕ, 2*m + n = (n + m) + m := by sos
+
+/-! #### Out-of-scope guards -/
+
+-- Truncated ℕ subtraction is refused with a hint.
+example : True := by
+  fail_if_success
+    (have : ∀ n : ℕ, n - 1 ≤ n := by sos)
+  trivial
+
+-- ℕ / ℤ division and modulo are refused (DIV / MOD support tracked
+-- in #24).
+example : True := by
+  fail_if_success
+    (have : ∀ a b : ℕ, b ≠ 0 → a / b * b ≤ a := by sos)
+  trivial

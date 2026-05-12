@@ -7,6 +7,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 import SOS.Reify
 import SOS.Search
 import SOS.Verifier
+import SOS.Lift
 import Lean.ToExpr
 import Lean.Elab.Tactic
 import Lean.Elab.Tactic.Config
@@ -312,6 +313,8 @@ private structure ParsedConclusionData (n : Nat) where
   tree : SOS.Poly n
   cmv  : Expr
   orig : Expr
+  /-- See `SOS.Reify.ParsedConcl.useSubBridge`. -/
+  useSubBridge : Bool
 
 /-- Extract and cast the conclusion polynomial for closed/strict modes. -/
 private def parsedConclusionData (tag : String)
@@ -322,7 +325,8 @@ private def parsedConclusionData (tag : String)
   let some pTree := castRawToPoly concl.raw n |
     throwError "{tag}: conclusion poly's maxAtomBound exceeds n = {n}"
   let pCMv ← toCMvExpr n pTree
-  return { tree := pTree, cmv := pCMv, orig := concl.orig }
+  return { tree := pTree, cmv := pCMv, orig := concl.orig,
+           useSubBridge := concl.useSubBridge }
 
 /-- The shape-specific data the unified close needs: which `Goal`
 constructor to invoke, which soundness lemma, and (for closed/strict)
@@ -366,8 +370,15 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
         #[p.cmv, gsListE, psListE, certE, decProof, φE, hgsProof, hpsProof]
       let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
       let pE := Lean.toExpr p.tree
-      mkAppOptM ``SOS.nonneg_orig_of_aeval
+      let hNonneg ← mkAppOptM ``SOS.nonneg_orig_of_aeval
         #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
+      -- For `a ≤ b` (sub-bridge) goals, `p.orig = b − a`, so the
+      -- recovered fact is `0 ≤ b − a`; wrap with `le_of_sub_nonneg`
+      -- to get the user-form `a ≤ b`.
+      if p.useSubBridge then
+        mkAppM ``le_of_sub_nonneg #[hNonneg]
+      else
+        pure hNonneg
     | .strict εE hεE =>
       let p ← parsedConclusionData "sos" parsed n
       let goalE ← mkAppOptM ``SOS.Goal.strict
@@ -378,8 +389,12 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
           hgsProof, hpsProof]
       let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
       let pE := Lean.toExpr p.tree
-      mkAppOptM ``SOS.pos_orig_of_aeval
+      let hPos ← mkAppOptM ``SOS.pos_orig_of_aeval
         #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
+      if p.useSubBridge then
+        mkAppM ``lt_of_sub_pos #[hPos]
+      else
+        pure hPos
     | .infeasible =>
       let goalE ← mkAppOptM ``SOS.Goal.infeasible #[some nE]
       let decProof ← buildCheckProof certE goalE gsListE psListE
@@ -591,19 +606,33 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
       let hεProof ← buildStrictHεProof εE
       withFoundCert res.cert (.strict εE hεProof) (some res.ε)
 
+/-- Run the lift pre-pass, then the SOS pipeline. The pre-pass may
+produce multiple subgoals (e.g. from an `Eq` conclusion split via
+`le_antisymm`), or close some subgoals outright (e.g. `n < n+1` over
+ℕ becomes `n+1 ≤ n+1` and the rewrite step closes it reflexively).
+Each surviving subgoal is parsed and closed independently. -/
+private def runSosWithLift (cfg : Config) (suggest? : Option Syntax)
+    (tag : String) : TacticM Unit := do
+  SOS.Lift.liftToReal
+  let goals ← getGoals
+  for g in goals do
+    -- Skip goals the lift pre-pass already closed.
+    if ← g.isAssigned then continue
+    setGoals [g]
+    let some parsed ← SOS.Reify.parseGoalAtomic |
+      throwError "{tag}: goal not in supported fragment"
+    runSosTactic parsed cfg suggest? tag
+  setGoals []
+
 elab_rules : tactic
   | `(tactic| sos $cfg:optConfig) => do
     let cfg ← elabConfig cfg
-    let some parsed ← SOS.Reify.parseGoalAtomic |
-      throwError "sos: goal not in supported fragment"
-    runSosTactic parsed cfg none "sos"
+    runSosWithLift cfg none "sos"
 
 elab_rules : tactic
   | `(tactic| sos?%$tk $cfg:optConfig) => do
     let cfg ← elabConfig cfg
-    let some parsed ← SOS.Reify.parseGoalAtomic |
-      throwError "sos?: goal not in supported fragment"
-    runSosTactic parsed cfg (some tk) "sos?"
+    runSosWithLift cfg (some tk) "sos?"
 
 /-- Shared body of `sos_witness` (with and without the `with ε := …`
 suffix). Elaborates the certificate, dispatches on the parsed goal
