@@ -687,15 +687,130 @@ private def runSosWithLift (cfg : Config) (suggest? : Option Syntax)
     SOS.Lift.liftToReal
     parseAndSearchAll cfg suggest? tag
 
+/-! ### Boolean-combination splitter
+
+Harrison's frontend reduces a conclusion of the form `p ∧ q` or
+`p ∨ q` (possibly nested) to a finite set of refutation subproblems
+before handing each off to the SOS pipeline. We do the same:
+
+* `p ∧ q` — split via `And.intro` and recurse on both subgoals.
+* `p ∨ q` — try the left disjunct (via `Or.inl`) and recurse on the
+  resulting subgoal; on any failure, restore the pre-split state and
+  try the right disjunct.
+
+Leading universal / hypothesis binders are introduced before the
+match so e.g. `∀ x : ℝ, 0 ≤ x^2 ∧ 0 ≤ x^4` is recognised. Nesting is
+capped at 3 levels — search cost grows multiplicatively in the
+conjunctive case and as a try/restore tree in the disjunctive case,
+so the cap protects users from runaway elaboration. The cap is
+enforced by a single preflight scan of the conclusion's Boolean tree,
+so it is a global property of the goal rather than a per-path bound
+(a `(too-deep) ∨ easy` goal is rejected even though the easy disjunct
+would otherwise succeed). Flatten the goal manually if you really
+need more depth.
+
+Disjunctive *hypotheses* are out of scope. -/
+
+/-- Maximum nested-Boolean depth handled by the splitter. -/
+private def maxBoolDepth : Nat := 3
+
+/-- Count the maximum nesting depth of `And` / `Or` in `e`, descending
+under `whnfR`. Leaves (anything that isn't an `And`/`Or` after
+reduction) contribute depth `0`; each `And`/`Or` node adds `1`. -/
+private partial def boolDepthOf (e : Expr) : MetaM Nat := do
+  let e ← whnfR e
+  match_expr e with
+  | And p q => return 1 + max (← boolDepthOf p) (← boolDepthOf q)
+  | Or  p q => return 1 + max (← boolDepthOf p) (← boolDepthOf q)
+  | _ => return 0
+
+/-- Split an `And p q` goal into its two children via the meta API,
+avoiding any tail-goal contamination that a generic `apply` /
+`refine` would expose to `getGoals`. -/
+private def splitAndGoal (mv : MVarId) : MetaM (MVarId × MVarId) := mv.withContext do
+  let goal ← mv.getType >>= instantiateMVars
+  match_expr (← whnfR goal) with
+  | And p q =>
+    let pMV ← mkFreshExprSyntheticOpaqueMVar p
+    let qMV ← mkFreshExprSyntheticOpaqueMVar q
+    mv.assign (← mkAppM ``And.intro #[pMV, qMV])
+    return (pMV.mvarId!, qMV.mvarId!)
+  | _ => throwError "splitAndGoal: goal is not an `And`"
+
+/-- Apply `Or.inl` (`side = false`) or `Or.inr` (`side = true`) to an
+`Or p q` goal, returning the single resulting subgoal. -/
+private def splitOrGoal (mv : MVarId) (side : Bool) : MetaM MVarId := mv.withContext do
+  let goal ← mv.getType >>= instantiateMVars
+  match_expr (← whnfR goal) with
+  | Or p q =>
+    if side then
+      let qMV ← mkFreshExprSyntheticOpaqueMVar q
+      mv.assign (← mkAppOptM ``Or.inr #[some p, some q, some qMV])
+      return qMV.mvarId!
+    else
+      let pMV ← mkFreshExprSyntheticOpaqueMVar p
+      mv.assign (← mkAppOptM ``Or.inl #[some p, some q, some pMV])
+      return pMV.mvarId!
+  | _ => throwError "splitOrGoal: goal is not an `Or`"
+
+/-- Splitter for Boolean combinations in the conclusion. Intros leading
+universal / hypothesis binders, then dispatches on `And` / `Or` /
+anything-else. Falls through to `runSosWithLift` at the leaves. The
+depth cap is enforced upstream by `runSosBool`. -/
+private partial def runSosBoolAux (cfg : Config) (suggest? : Option Syntax)
+    (tag : String) : TacticM Unit := withMainContext do
+  SOS.Lift.introLeadingBindersAux
+  let mv ← getMainGoal
+  let goal ← mv.getType >>= instantiateMVars
+  match_expr (← whnfR goal) with
+  | And _ _ =>
+    let (lMV, rMV) ← splitAndGoal mv
+    setGoals [lMV]
+    runSosBoolAux cfg suggest? tag
+    let lLeftovers ← getGoals
+    setGoals [rMV]
+    runSosBoolAux cfg suggest? tag
+    let rLeftovers ← getGoals
+    setGoals (lLeftovers ++ rLeftovers)
+  | Or _ _ =>
+    let st ← saveState
+    try
+      let lMV ← splitOrGoal mv (side := false)
+      setGoals [lMV]
+      runSosBoolAux cfg suggest? tag
+    catch leftEx =>
+      trace[sos.lift] "Or.inl failed; trying Or.inr: {leftEx.toMessageData}"
+      st.restore
+      let mv ← getMainGoal
+      let rMV ← splitOrGoal mv (side := true)
+      setGoals [rMV]
+      runSosBoolAux cfg suggest? tag
+  | _ =>
+    runSosWithLift cfg suggest? tag
+
+/-- Entry point. Intros leading binders so the depth scan sees the
+conclusion under any `∀`, checks the Boolean-nesting cap once
+globally, and then dispatches via `runSosBoolAux`. -/
+private def runSosBool (cfg : Config) (suggest? : Option Syntax)
+    (tag : String) : TacticM Unit := withMainContext do
+  SOS.Lift.introLeadingBindersAux
+  let mv ← getMainGoal
+  let goal ← mv.getType >>= instantiateMVars
+  let d ← boolDepthOf goal
+  if d > maxBoolDepth then
+    throwError "{tag}: boolean nesting in conclusion exceeds depth \
+      {maxBoolDepth} (found {d}); flatten the goal or split manually"
+  runSosBoolAux cfg suggest? tag
+
 elab_rules : tactic
   | `(tactic| sos $cfg:optConfig) => do
     let cfg ← elabConfig cfg
-    runSosWithLift cfg none "sos"
+    runSosBool cfg none "sos"
 
 elab_rules : tactic
   | `(tactic| sos?%$tk $cfg:optConfig) => do
     let cfg ← elabConfig cfg
-    runSosWithLift cfg (some tk) "sos?"
+    runSosBool cfg (some tk) "sos?"
 
 /-- Shared body of `sos_witness` (with and without the `with ε := …`
 suffix). Elaborates the certificate, dispatches on the parsed goal

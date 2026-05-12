@@ -279,3 +279,56 @@ example : ∀ n : ℕ, n - 1 ≤ n := by sos
 -/
 #guard_msgs in
 example : ∀ a b : ℕ, b ≠ 0 → a / b * b ≤ a := by sos
+
+/-! ## §10. Boolean combinations in conclusions
+
+`by sos` splits a conjunctive conclusion `p ∧ q` via `And.intro` and
+runs the rest of the pipeline on each subgoal; for a disjunctive
+conclusion `p ∨ q` it tries `Or.inl` first and falls back to `Or.inr`
+on failure. Nesting is capped at depth 3.
+
+Disjunctive *hypotheses* are out of scope. -/
+
+-- Simple conjunction.
+example (x : ℝ) : 0 ≤ x^2 ∧ 0 ≤ x^4 := by sos
+
+-- Conjunction under a leading ∀.
+example : ∀ x : ℝ, 0 ≤ x^2 ∧ 0 ≤ x^4 := by sos
+
+-- Disjunction where the left disjunct succeeds.
+example : ∀ x : ℝ, 0 ≤ x^2 ∨ 0 ≤ -(x^2 + 1) := by sos
+
+-- Disjunction where the left disjunct fails (false at `x = 0`), forcing
+-- the `Or.inr` retry to find the certificate.
+example : ∀ x : ℝ, 0 ≤ -(x^2 + 1) ∨ 0 ≤ x^2 := by sos
+
+-- Nested: `(p ∧ q) ∧ r` — depth 2.
+example (x y : ℝ) : (0 ≤ x^2 ∧ 0 ≤ y^2) ∧ 0 ≤ x^2 + y^2 := by sos
+
+-- Mixed nesting: conjunction inside disjunction.
+example (x y : ℝ) : (0 ≤ -(x^2 + 1)) ∨ (0 ≤ x^2 ∧ 0 ≤ y^2) := by sos
+
+-- Constrained conjunction: each conjunct uses the shared hypothesis.
+example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^3 + x ∧ 0 ≤ x^2 - x + 1/4 := by sos
+
+-- ℤ conjunction — the lift pre-pass runs on each conjunct independently.
+example (a b : ℤ) : 2*a*b ≤ a^2 + b^2 ∧ 0 ≤ a^2 + b^2 := by sos
+
+-- A graceful failure: neither disjunct is true (both polynomials are
+-- strictly negative), so both `Or.inl` and `Or.inr` arms fail.
+example : True := by
+  fail_if_success
+    (have : ∀ x : ℝ, (0 ≤ -(x^2 + 1)) ∨ (0 ≤ -(x^4 + 1)) := by sos)
+  trivial
+
+-- Depth cap: exactly three nested splits is fine.
+example (x : ℝ) : ((0 ≤ x^2 ∧ 0 ≤ x^2) ∧ 0 ≤ x^2) ∧ 0 ≤ x^2 := by sos
+
+-- Depth cap: a left-nested chain of four `And`s exceeds the limit.
+-- The check is a global preflight scan, so a too-deep subtree is
+-- rejected even if some other branch would have closed easily.
+/-- error: sos: boolean nesting in conclusion exceeds depth 3 (found 4); flatten the goal or split manually
+-/
+#guard_msgs in
+example (x : ℝ) :
+    (((0 ≤ x^2 ∧ 0 ≤ x^2) ∧ 0 ≤ x^2) ∧ 0 ≤ x^2) ∧ 0 ≤ x^2 := by sos
