@@ -202,11 +202,11 @@ example (x y z : ℝ) :
     0 ≤ (x^2 + y^2 + z^2) *
         (x^4*y^2 + x^2*y^4 + z^6 - 3*x^2*y^2*z^2) := by sos
 
--- FIXME sos.ml:1800 — 2-variable degree-10. Needs Newton-polytope
--- pruning; the dense `monomialsUpTo 2 5` basis blows the SDP into
--- a non-roundable Gram region.
--- example (x y : ℝ) :
---     0 ≤ 4*x^4*y^6 + x^2 - x*y^2 + y^2 := by sos
+-- sos.ml:1800 — 2-variable degree-10 sparse. Support-dominance
+-- pruning closes the SDP that the dense `monomialsUpTo 2 5` basis
+-- (21 monomials) cannot.
+example (x y : ℝ) :
+    0 ≤ 4*x^4*y^6 + x^2 - x*y^2 + y^2 := by sos
 
 -- FIXME sos.ml:1802 — 2-variable degree-6, Motzkin-like form. Likely
 -- needs iterative deepening to bump the multiplier basis past
@@ -215,7 +215,9 @@ example (x y z : ℝ) :
 --     0 ≤ 4096 * (x^4 + x^2 + z^6 - 3*x^2*z^2) + 729 := by sos
 
 -- FIXME sos.ml:1805 — 2-variable degree-6 with linear `30*x*y` and
--- constants. Rounding miss at the fixed relaxation level.
+-- constants. Dense attempt misses on rounding. Support-dominance
+-- doesn't fire either: 7 support monomials against a 10-monomial
+-- dense σ₀ basis (`C(2+3, 3)`) gives `4·7 ≥ 10`.
 -- example (x y : ℝ) :
 --     0 ≤ 120*x^2 - 63*x^4 + 10*x^6 + 30*x*y - 120*y^2 + 120*y^4 + 31 := by sos
 
@@ -232,7 +234,7 @@ example (x y z : ℝ) :
 --     0 ≤ 100*((2*x - 2)^2 + (x^3 - 8*x - 2)^2) - 588 := by sos
 
 -- FIXME sos.ml:1832 — Rearranged form of the 1805 polynomial, fails
--- for the same reason.
+-- for the same reason: not sparse enough for support-dominance.
 -- example (x y : ℝ) :
 --     0 ≤ x^2*(120 - 63*x^2 + 10*x^4) + 30*x*y
 --         + 30*y^2*(4*y^2 - 4) + 31 := by sos
@@ -275,8 +277,9 @@ example (x y z w : ℝ) :
         + 3*x^2 + w^2 + 2*z*w + z^2 + 2*z + 2*w + 1 := by sos
 
 -- FIXME sos.ml:1886 — 4-variable degree-4, with cross-terms
--- `2*x*y*z^2 + 2*x*y*w^2`. The 4-variable degree-2 multiplier basis
--- has 15 monomials; the SDP solves but rounding misses.
+-- `2*x*y*z^2 + 2*x*y*w^2`. The dense σ₀ basis has 15 monomials
+-- (`C(4+2, 2)`); the SDP solves but rounding misses, and the target
+-- isn't sparse enough to trigger support-dominance pruning.
 -- example (x y z w : ℝ) :
 --     0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
 --         + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
