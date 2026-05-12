@@ -273,9 +273,12 @@ example : True := by
 #guard_msgs in
 example : ∀ n : ℕ, n - 1 ≤ n := by sos
 
--- ℕ / ℤ division and modulo are refused (DIV / MOD support tracked in
--- https://github.com/kim-em/sos/issues/24).
-/-- error: sos: `by sos` does not handle `Nat.div` / `Int.div`; DIV / MOD support is tracked in https://github.com/kim-em/sos/issues/24.
+-- ℕ / ℤ DIV/MOD with positive literal divisor is supported via the
+-- enrichment witnesses introduced by the lift pre-pass (issue #24).
+-- A non-literal divisor (here `b`) skips the enrichment, leaving the
+-- reifier to treat `a / b` as an opaque atom; without the witness
+-- constraints the search has nothing to certify against and fails.
+/-- error: sos: search failed to find an infeasibility certificate
 -/
 #guard_msgs in
 example : ∀ a b : ℕ, b ≠ 0 → a / b * b ≤ a := by sos
