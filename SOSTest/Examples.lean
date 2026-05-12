@@ -1,6 +1,8 @@
 /-
-Speed-test candidate set. Build target is wall-clock < 60s for the
-whole file on the kim-em/sos main toolchain.
+Speed-test candidate set. Build target is wall-clock < 90s for the
+whole file on the kim-em/sos main toolchain. The 1879 Zeng example
+alone closes at iterative-deepening level 3 (~15s of CSDP wall-clock);
+this is the dominant cost beyond the level-0 baseline of ~30–40s.
 -/
 import SOS
 
@@ -169,13 +171,12 @@ ported here.
 
 Examples flagged with `-- FIXME` were verified by hand-running each
 through `by sos` in isolation; they're within the supported fragment
-but don't currently produce a certificate. The cause is almost always
-the absence of iterative deepening (README "Single fixed relaxation
-level"): the multiplier basis is fixed at `⌈D/2⌉` from the polynomial
-degrees, and Harrison's REAL_SOS bumps this on failure. A few of the
-multivariate direct-SOS failures (1819, 1805, 1832, …) likely also
-need Newton-polytope monomial pruning to land on a Gram matrix that
-rounds back to PSD. -/
+but don't currently produce a certificate. Iterative deepening
+(`sos.maxDepth`, default 3) now closes some previously-failing
+examples — see 1879 below — but several FIXMEs still resist: the
+deepened SDP either fails to converge or returns a Gram that doesn't
+round to PSD. These almost always need Newton-polytope monomial
+pruning (issue #17) on top of deepening to land on a usable Gram. -/
 
 /-! #### Direct SOS, no hypotheses (Harrison's `SOS_CONV` / `PURE_SOS`) -/
 
@@ -280,13 +281,13 @@ example (x y z w : ℝ) :
 --     0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
 --         + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
 
--- FIXME sos.ml:1879 — Harrison's flagged hard Zeng case. He notes
+-- sos.ml:1879 — Harrison's flagged hard Zeng case. Harrison notes
 -- "REAL_SOS does finally converge on the second run at level 12";
--- requires iterative deepening.
--- example (x y z : ℝ) :
---     0 ≤ x^4*y^4 - 2*x^5*y^3*z^2 + x^6*y^2*z^4
---         + 2*x^2*y^3*z - 4*x^3*y^2*z^3 + 2*x^4*y*z^5
---         + z^2*y^2 - 2*z^4*y*x + z^6*x^2 := by sos
+-- our iterative deepening closes it at level 3 (`sos.maxDepth` default).
+example (x y z : ℝ) :
+    0 ≤ x^4*y^4 - 2*x^5*y^3*z^2 + x^6*y^2*z^4
+        + 2*x^2*y^3*z - 4*x^3*y^2*z^3 + 2*x^4*y*z^5
+        + z^2*y^2 - 2*z^4*y*x + z^6*x^2 := by sos
 
 /-! #### REAL_SOS with Putinar-style hypotheses -/
 
@@ -294,10 +295,12 @@ example (x y z w : ℝ) :
 example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
     0 ≤ (x^2 + y^2)^2 - x*y*(x + y)^2 := by sos
 
--- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The
--- certificate `(x-1)(y-1)` requires σ₁ = (x-1) which is not SOS;
--- the next relaxation level (with degree-2 σᵢ) suffices but our
--- search has no iterative deepening.
+-- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The natural
+-- certificate `(x-1)(y-1)` requires σ₁ = (x-1) which is not SOS, and
+-- iterative deepening alone (`sos.maxDepth`) doesn't recover it
+-- — empirically the deepened SDP either fails to converge or rounds
+-- to a non-PSD Gram. Likely needs Newton-polytope basis pruning
+-- (issue #17) to land on a usable Gram at depth ≥ 1.
 -- example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
 --     0 ≤ x*y - (x + y - 1) := by sos
 
@@ -306,7 +309,9 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 --     0 < x*y - (x + y - 1) := by sos
 
 -- FIXME sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`.
--- Putinar form needs degree-2 multipliers on the linear hypotheses.
+-- Putinar form needs degree-2 multipliers on the linear hypotheses;
+-- iterative deepening grows the basis but CSDP still can't round to
+-- a valid Gram. Same expected cure as 1654: basis pruning (#17).
 -- example (x y z : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_hz : 0 ≤ z)
 --     (_hs : x + y + z - 3 ≤ 0) :
 --     0 ≤ x*y + x*z + y*z - 3*x*y*z := by sos

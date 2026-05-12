@@ -29,6 +29,21 @@ register_option sos.maxRoundingDenom : Nat := {
   descr := "Maximum denominator tried during SOS rational rounding."
 }
 
+/-- Iterative-deepening cap: maximum `extraDeg` relaxation level tried
+during SOS search. At each level the σ₀ basis and every σᵢ multiplier
+basis grow by one monomial-degree, allowing certificates that the
+fixed level-0 encoding cannot find. Harrison's `REAL_SOS` reports
+needing depths up to 12 for some examples; we cap at 3 by default
+because each level is a full fresh CSDP solve (CSDP has no warm
+starts) and the SDP size grows combinatorially with the basis. Raise
+via `set_option sos.maxDepth 6` for hard targets; lower to 0 to
+restore single-level behaviour. -/
+register_option sos.maxDepth : Nat := {
+  defValue := 3
+  descr := "Maximum extra basis-degree relaxations during SOS search \
+            (iterative deepening)."
+}
+
 /-! ### Common Expr fragments -/
 
 /-- `Lean.Expr` for `ℝ`, used throughout the elaborator. -/
@@ -547,24 +562,26 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
       emitSosSuggestion tk (formatDecompiledCertificate decompiled) ε?
     let certE ← certExprOfDecompiled n decompiled
     closeSos parsed certE mode
-  let maxDenom := sos.maxRoundingDenom.get (← getOptions)
+  let opts ← getOptions
+  let maxDenom := sos.maxRoundingDenom.get opts
+  let maxDepth := sos.maxDepth.get opts
   match parsed.shape with
   | .closed =>
     let p ← parsedConclusionData s!"{tag} (closed)" parsed n
     let goal : SOS.Goal n := .closed p.tree.toCMv
-    match (← (SOS.Search.runSearch goal gsCMv psCMv (maxRoundingDenom := maxDenom) :
-        IO _)) with
+    match (← (SOS.Search.runSearch goal gsCMv psCMv
+        (maxRoundingDenom := maxDenom) (maxDepth := maxDepth) : IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
     | some cert => withFoundCert cert .closed none
   | .infeasible =>
     match (← (SOS.Search.runSearch .infeasible gsCMv psCMv
-        (maxRoundingDenom := maxDenom) : IO _)) with
+        (maxRoundingDenom := maxDenom) (maxDepth := maxDepth) : IO _)) with
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
     match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv
-        (maxRoundingDenom := maxDenom) : IO _)) with
+        (maxRoundingDenom := maxDenom) (maxDepth := maxDepth) : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε
