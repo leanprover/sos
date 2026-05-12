@@ -612,6 +612,111 @@ def decodeSolution (sol : LeanCsdp.Solution) (denom : ℚ) :
       acc := acc.push diag
   return some acc
 
+/-! ### Pre-CSDP matrix conditioning
+
+Harrison's `scale_then` (`sos.ml:634`) preconditions the SDP before CSDP
+by scaling the constraint matrices and the LP cost vector by *independent*
+powers of two so each lands near `2^20`. We mirror this in our primal
+encoding by choosing two shifts: `shiftAC` for the constraint matrices
+`Aᵢ` (and the cost matrix `C`), and `shiftB` for the RHS `b`. Both are
+computed so the corresponding entries land near `2^20` after scaling.
+
+Under `Aᵢ → 2^shiftAC · Aᵢ`, `b → 2^shiftB · b` (`C → 2^shiftAC · C`),
+the new constraint reads
+  `tr(2^shiftAC · Aᵢ · X') = 2^shiftB · bᵢ`
+i.e. `tr(Aᵢ · X') = 2^(shiftB − shiftAC) · bᵢ`. By linearity in `b`,
+the scaled optimum is `X' = 2^(shiftB − shiftAC) · X*`, so we recover
+`X* = 2^(shiftAC − shiftB) · X'` before the rational rounder runs.
+
+When `shiftAC = shiftB` the scaling is uniform (an SDP equivalence,
+`X*` preserved theoretically) and the post-multiply is a no-op. This
+is the common case — typical targets have `Aᵢ` entries `0`/`1` and `b`
+entries `O(1)`, both shifted to `2^20`. Targets like `sos.ml:1829`
+with target coefficients spanning `100..6800` get `shiftAC = 20` but
+`shiftB = 7`, so CSDP sees a problem where the scaled optimum sits in
+a moderate magnitude band — better-conditioned but not, on its own,
+sufficient to close every `PURE_SOS` rounding miss. Treat this as
+groundwork rather than a complete fix for the conditioning-flagged
+FIXMEs (see issue #36's "Why this also matters" note). -/
+
+/-- Largest absolute value over a single component of the SDP data. -/
+private def maxA (problem : LeanCsdp.Problem) : Float := Id.run do
+  let mut m : Float := 0.0
+  for t in problem.a do
+    let v := t.value.abs
+    if v > m then m := v
+  return m
+
+private def maxB (problem : LeanCsdp.Problem) : Float := Id.run do
+  let mut m : Float := 0.0
+  for x in problem.b do
+    let v := x.abs
+    if v > m then m := v
+  return m
+
+private def maxC (problem : LeanCsdp.Problem) : Float := Id.run do
+  let mut m : Float := 0.0
+  for t in problem.c do
+    let v := t.value.abs
+    if v > m then m := v
+  return m
+
+/-- Power-of-two shift bringing `entry` near `2^20`, clamped to
+`[-30, +30]` so a wild value (zero, inf, NaN) can't blow the exponent.
+Returns `0` (no-op) when `entry` is non-positive or non-finite. -/
+private def chooseShift (entry : Float) : Int :=
+  if entry ≤ 0.0 then 0
+  else if entry.isNaN || entry.isInf then 0
+  else
+    let logRatio : Float := Float.log entry / Float.log 2.0
+    -- `⌈x⌉` via `−⌊−x⌋`; convert through Int64.
+    let ceilLog : Int := (-((-logRatio).floor.toInt64.toInt))
+    let s : Int := 20 - ceilLog
+    if s < -30 then -30 else if s > 30 then 30 else s
+
+/-- `2^shift` as a `Float`. Implemented via `Float.pow` with the
+exponent cast through `Float.ofInt`, which is exact for the clamped
+range `[-30, 30]`. -/
+private def pow2Float (shift : Int) : Float :=
+  Float.pow 2.0 (Float.ofInt shift)
+
+/-- Apply `(shiftAC, shiftB)` to a CSDP problem: `Aᵢ` and `C` are
+multiplied by `2^shiftAC`, `b` by `2^shiftB`. Returns the scaled
+problem and the resulting "X back-shift" — the exponent to multiply
+CSDP's returned `X` by to recover `X*` (see the module note above).
+Both shifts `0` ⇒ identity. -/
+private def conditionProblem (problem : LeanCsdp.Problem) :
+    LeanCsdp.Problem × Int :=
+  let mA := maxA problem
+  let mC := maxC problem
+  let shiftAC := chooseShift (if mA > mC then mA else mC)
+  let shiftB  := chooseShift (maxB problem)
+  if shiftAC = 0 ∧ shiftB = 0 then (problem, 0)
+  else
+    let sAC := pow2Float shiftAC
+    let sB  := pow2Float shiftB
+    let problem' : LeanCsdp.Problem := { problem with
+        a := problem.a.map fun t => { t with value := t.value * sAC }
+        b := problem.b.map (· * sB)
+        c := problem.c.map fun t => { t with value := t.value * sAC } }
+    (problem', shiftAC - shiftB)
+
+/-- Multiply every Gram entry of `sol.X` by `2^xShift` to reverse the
+back-shift accumulated by `conditionProblem`. `xShift = 0` is a no-op. -/
+private def unscaleSolution (sol : LeanCsdp.Solution) (xShift : Int) :
+    LeanCsdp.Solution :=
+  if xShift = 0 then sol
+  else
+    let s := pow2Float xShift
+    let scaleArr (a : FloatArray) : FloatArray := Id.run do
+      let mut out : FloatArray := FloatArray.empty
+      for i in [0:a.size] do out := out.push (a.get! i * s)
+      return out
+    let scaleBlock : LeanCsdp.Block → LeanCsdp.Block
+      | .sdp n e  => .sdp n (scaleArr e)
+      | .diag n e => .diag n (scaleArr e)
+    { sol with X := sol.X.map scaleBlock }
+
 /-! ### Top-level search driver -/
 
 /-- Convert a basis of monomials into the `Array (CMvPolynomial n ℚ)`
@@ -700,9 +805,17 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
                     eqCofs := ps.map fun _ => CMvPolynomial.C 0 }
     else
       return none
+  -- Precondition the SDP: scale `Aᵢ`/`C` and `b` by independent powers
+  -- of two so each lands near `2^20`. When the chosen shifts differ
+  -- (e.g. `sos.ml:1829` where target coefficients span `100..6800`),
+  -- CSDP's returned `X' = 2^(shiftB − shiftAC) · X*` is moderate-magnitude
+  -- and rounds cleanly; we recover `X*` by `unscaleSolution`. See the
+  -- "Pre-CSDP matrix conditioning" section above.
+  let (problem, xShift) := conditionProblem problem
   let sol := LeanCsdp.solve problem
   if sol.ret ∉ [0, 3] then
     return none
+  let sol := unscaleSolution sol xShift
   let targetDenom : ℚ := (polyDenom target : ℚ)
   let constraintDenoms : List ℚ := gs.map fun g => (polyDenom g : ℚ)
   let equalityDenoms : List ℚ := ps.map fun p => (polyDenom p : ℚ)
@@ -857,8 +970,13 @@ def runStrict (p : CMvPolynomial n ℚ)
     let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
       buildSdp p gs .lpSlack ps extraDeg
     let some lambdaBlockIdx := lambdaBlockIdx? | return none
+    -- Same pre-CSDP conditioning as `tryOneSdp`. `λ` lives in a primal
+    -- block of `sol.X`, so it scales with `X*` and `unscaleSolution`
+    -- recovers it in the polynomial scale used to pick rational `ε`.
+    let (problem, xShift) := conditionProblem problem
     let sol := LeanCsdp.solve problem
     if sol.ret ∉ [0, 3] then continue
+    let sol := unscaleSolution sol xShift
     let lambdaStar := readLambda sol lambdaBlockIdx
     if lambdaStar ≤ 0.000000001 then continue
     -- Find the smallest k such that 2^-k ≤ 2·λ*. The factor-2 slack
