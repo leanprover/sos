@@ -174,9 +174,11 @@ through `by sos` in isolation; they're within the supported fragment
 but don't currently produce a certificate. Iterative deepening (opt
 in via `sos (config := { maxDepth := k })`) recovers some — see 1879
 below — but several FIXMEs still resist: the deepened SDP either
-fails to converge or returns a Gram that doesn't round to PSD. These
-need Newton-polytope monomial pruning (issue #17), preordering-style
-encodings, or both, on top of deepening. -/
+fails to converge or returns a Gram that doesn't round to PSD.
+Half-Newton-polytope basis pruning (#23) has landed and doesn't move
+any of these FIXMEs; the residual failures are about rounding,
+preordering / Schmüdgen-style encodings, or the cofactor-LP recession
+on equality-hypothesis goals, not σ₀ basis size. -/
 
 /-! #### Direct SOS, no hypotheses (Harrison's `SOS_CONV` / `PURE_SOS`) -/
 
@@ -202,9 +204,9 @@ example (x y z : ℝ) :
     0 ≤ (x^2 + y^2 + z^2) *
         (x^4*y^2 + x^2*y^4 + z^6 - 3*x^2*y^2*z^2) := by sos
 
--- sos.ml:1800 — 2-variable degree-10 sparse. Support-dominance
--- pruning closes the SDP that the dense `monomialsUpTo 2 5` basis
--- (21 monomials) cannot.
+-- sos.ml:1800 — 2-variable degree-10 sparse. Half-Newton-polytope
+-- pruning (#23) closes the SDP that the dense `monomialsUpTo 2 5`
+-- basis (21 monomials) cannot.
 example (x y : ℝ) :
     0 ≤ 4*x^4*y^6 + x^2 - x*y^2 + y^2 := by sos
 
@@ -215,15 +217,18 @@ example (x y : ℝ) :
 --     0 ≤ 4096 * (x^4 + x^2 + z^6 - 3*x^2*z^2) + 729 := by sos
 
 -- FIXME sos.ml:1805 — 2-variable degree-6 with linear `30*x*y` and
--- constants. Dense attempt misses on rounding. Support-dominance
--- doesn't fire either: 7 support monomials against a 10-monomial
--- dense σ₀ basis (`C(2+3, 3)`) gives `4·7 ≥ 10`.
+-- constants. Dense attempt misses on rounding. Newton pruning (#23)
+-- doesn't fire either — the sparsity gate (`4·|support| ≥
+-- C(n+D, D)`) skips it: 7 support monomials against a 10-monomial
+-- dense σ₀ basis. Confirmed at `maxDepth := 2` too.
 -- example (x y : ℝ) :
 --     0 ≤ 120*x^2 - 63*x^4 + 10*x^6 + 30*x*y - 120*y^2 + 120*y^4 + 31 := by sos
 
 -- FIXME sos.ml:1819 — 3-variable degree-4 with linear+constant tail.
 -- Surprising failure given the modest degree; likely a rounding miss
 -- on the Gram matrix (the polynomial is bounded below by ≈ 1.59).
+-- Newton pruning (#23) doesn't move it (confirmed at `maxDepth :=
+-- 2`), consistent with the rounding-miss diagnosis.
 -- example (x y z : ℝ) :
 --     0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 := by sos
 
@@ -234,7 +239,8 @@ example (x y : ℝ) :
 --     0 ≤ 100*((2*x - 2)^2 + (x^3 - 8*x - 2)^2) - 588 := by sos
 
 -- FIXME sos.ml:1832 — Rearranged form of the 1805 polynomial, fails
--- for the same reason: not sparse enough for support-dominance.
+-- for the same reason: not sparse enough for Newton pruning to fire,
+-- dense rounding misses.
 -- example (x y : ℝ) :
 --     0 ≤ x^2*(120 - 63*x^2 + 10*x^4) + 30*x*y
 --         + 30*y^2*(4*y^2 - 4) + 31 := by sos
@@ -279,7 +285,7 @@ example (x y z w : ℝ) :
 -- FIXME sos.ml:1886 — 4-variable degree-4, with cross-terms
 -- `2*x*y*z^2 + 2*x*y*w^2`. The dense σ₀ basis has 15 monomials
 -- (`C(4+2, 2)`); the SDP solves but rounding misses, and the target
--- isn't sparse enough to trigger support-dominance pruning.
+-- isn't sparse enough for Newton pruning (#23) to fire.
 -- example (x y z w : ℝ) :
 --     0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
 --         + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
@@ -322,8 +328,9 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 -- FIXME sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`.
 -- Putinar form needs degree-2 multipliers on the linear hypotheses;
 -- raising `maxDepth` grows the basis but CSDP still can't round to
--- a valid Gram at any depth I've tried. Likely needs basis pruning
--- (#17).
+-- a valid Gram at any depth I've tried. Newton pruning (#23) doesn't
+-- fix it either — diagnosis is rounding / preordering, not basis
+-- size.
 -- example (x y z : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_hz : 0 ≤ z)
 --     (_hs : x + y + z - 3 ≤ 0) :
 --     0 ≤ x*y + x*z + y*z - 3*x*y*z := by sos
