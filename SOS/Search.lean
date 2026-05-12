@@ -202,14 +202,6 @@ def buildBlocks (target : CMvPolynomial n ℚ)
     if target.coeff (zeroMono n) = 0 then
       σ₀Basis.filter (fun m => m ≠ zeroMono n)
     else σ₀Basis
-  -- Support-dominance plus the constant-monomial filter can over-
-  -- prune to an empty basis (e.g. a multilinear target with no
-  -- constant term, where no candidate beats `2·m[i] ≤ m'[i]` against
-  -- any support monomial). CSDP rejects 0×0 blocks; fall back to
-  -- `[zeroMono]` so the SDP is well-formed. The pruned attempt will
-  -- not certify, but the search loop's full-basis fallback will.
-  let σ₀Basis :=
-    if σ₀Basis.size == 0 then monomialsUpTo n 0 else σ₀Basis
   blocks := blocks.push { basis := σ₀Basis, multiplier := CMvPolynomial.C 1 }
   for g in gs do
     let gDeg := g.totalDegree
@@ -690,31 +682,35 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   let strategies : List Bool := match goal with
     | .infeasible => [false]
     | _           => [true, false]
-  -- Support-dominance pruning. At each relaxation level, try the
-  -- pruned σ₀ basis first only when the target looks visibly sparse
-  -- relative to the full basis (`4·|support| < C(n+D, D)` — the
-  -- issue's suggested gate). The fallback to the full basis before
-  -- bumping `extraDeg` is mandatory for completeness; the support-
-  -- dominance heuristic is strictly more aggressive than the correct
-  -- half-Newton-polytope condition.
-  --
-  -- Why the sparsity gate, not a strict `newton < full` comparison?
-  -- The latter is cleaner but in practice triggers Newton on dense-
-  -- ish polynomials where the pruning is modest and the extra big
-  -- CSDP solve appears to destabilise the solver on subsequent
-  -- targets in the same process. The 4× gate keeps Newton to cases
-  -- where pruning is large enough to plausibly help, and matches the
-  -- pre-emptive mitigation the issue describes.
+  -- Support-dominance pruning, gated to visibly sparse targets
+  -- (`4·|support| < C(n+D, D)`, the issue's suggested heuristic).
+  -- Disabled for infeasibility goals, where `target = -1` and the
+  -- support of `target` carries no information about which σ₀ basis
+  -- monomials can appear. The fallback to the full basis before
+  -- bumping `extraDeg` is mandatory for completeness — support-
+  -- dominance is strictly more aggressive than the correct half-
+  -- Newton-polytope condition.
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
   let maxPDeg := ps.foldl (fun acc p => Nat.max acc p.totalDegree) 0
   let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
   let supportSize := target.monomials.length
+  let dropConstant := target.coeff (zeroMono n) = 0
+  let newtonAllowed : Bool := match goal with
+    | .infeasible => false
+    | _           => true
   for extraDeg in [0:maxDepth + 1] do
     let basisDeg := halfCeil σ₀Deg + extraDeg
     let fullBasisSize := (monomialsUpTo n basisDeg).size
+    let tryNewton : Bool :=
+      if !newtonAllowed then false
+      else if 4 * supportSize ≥ fullBasisSize then false
+      else
+        let newton := supportDominanceBasis target basisDeg
+        let post := if dropConstant then newton.filter (· ≠ zeroMono n) else newton
+        0 < post.size ∧ post.size < fullBasisSize
     let newtonStrategies : List Bool :=
-      if 4 * supportSize < fullBasisSize then [true, false] else [false]
+      if tryNewton then [true, false] else [false]
     for useNewton in newtonStrategies do
       for useTraceCost in strategies do
         if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
