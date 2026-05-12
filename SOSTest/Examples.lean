@@ -343,6 +343,18 @@ These exercise internal helpers (`monomialsUpTo`, `decodeSdpBlock`,
 mis-handles the empty / null case is caught here rather than only by
 the end-to-end `by sos` examples above. -/
 
+/-! The denser rounding schedule (#15) is `[1..63]` followed by
+alternating `2^k`, `3·2^(k-1)` for `k = 6..19`, then `2^20`. -/
+#guard SOS.Search.niceDenominators.length = 63 + 14 * 2 + 1
+#guard (SOS.Search.niceDenominators.take 63) =
+    ((List.range 63).map (fun i => (i + 1 : ℚ)))
+#guard (SOS.Search.niceDenominators.drop 63).take 6 =
+    [(64 : ℚ), 96, 128, 192, 256, 384]
+#guard SOS.Search.niceDenominators.getLast? = some (1048576 : ℚ)
+-- Densified region was absent from the old `[1..31] ++ [2^5..2^20]`.
+#guard SOS.Search.niceDenominators.contains (45 : ℚ)
+#guard SOS.Search.niceDenominators.contains (96 : ℚ)
+
 #guard (SOS.Search.monomialsUpTo 2 2).size = 6
 #guard
   match (SOS.Search.monomialsUpTo 2 2)[1]? with

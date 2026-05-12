@@ -17,6 +17,18 @@ namespace SOS
 
 open Lean Elab Tactic Meta
 
+/-- Upper bound on rounding-denominator candidates filtered against
+the schedule. The fixed schedule (`SOS.Search.niceDenominators`) tops
+out at `2^20`; this cap also gates `polyDenom target`, constraint and
+equality denoms, and the cross-product denoms `polyDenom (target * gᵢ)`.
+Raise it (`set_option sos.maxRoundingDenom 16777216`) for targets whose
+`polyDenom` exceeds `2^20`; lower it to fail faster on goals you
+already know aren't going to round cleanly. -/
+register_option sos.maxRoundingDenom : Nat := {
+  defValue := 1048576
+  descr := "Maximum denominator tried during SOS rational rounding."
+}
+
 /-! ### Common Expr fragments -/
 
 /-- `Lean.Expr` for `ℝ`, used throughout the elaborator. -/
@@ -535,20 +547,24 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal)
       emitSosSuggestion tk (formatDecompiledCertificate decompiled) ε?
     let certE ← certExprOfDecompiled n decompiled
     closeSos parsed certE mode
+  let maxDenom := sos.maxRoundingDenom.get (← getOptions)
   match parsed.shape with
   | .closed =>
     let p ← parsedConclusionData s!"{tag} (closed)" parsed n
     let goal : SOS.Goal n := .closed p.tree.toCMv
-    match (← (SOS.Search.runSearch goal gsCMv psCMv : IO _)) with
+    match (← (SOS.Search.runSearch goal gsCMv psCMv (maxRoundingDenom := maxDenom) :
+        IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
     | some cert => withFoundCert cert .closed none
   | .infeasible =>
-    match (← (SOS.Search.runSearch .infeasible gsCMv psCMv : IO _)) with
+    match (← (SOS.Search.runSearch .infeasible gsCMv psCMv
+        (maxRoundingDenom := maxDenom) : IO _)) with
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
-    match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv : IO _)) with
+    match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv
+        (maxRoundingDenom := maxDenom) : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε
