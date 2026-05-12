@@ -579,6 +579,11 @@ example (x y : ℚ) : 4*x^2*y^2 ≤ (x^2 + y^2)^2 := by sos
 
 example : ∀ n : ℕ, ∀ x : ℝ, 0 ≤ x^2 + n := by sos
 
+-- ℕ-cast atom appears only in a hypothesis (the conclusion is over ℝ
+-- with no ℕ casts). The lift pre-pass must scan local hypothesis types
+-- too, otherwise the `0 ≤ ↑n` fact never reaches the SOS reifier.
+example (n : ℕ) (x : ℝ) (_h : (n : ℝ) = x) : 0 ≤ x := by sos
+
 /-! #### Strict ℕ via `Nat.lt_iff_add_one_le` -/
 
 -- `n < n+1` rewrites to `n+1 ≤ n+1`, which the rewrite step closes

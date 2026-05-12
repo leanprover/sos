@@ -205,11 +205,26 @@ private def natCastArg? (e : Expr) : Option Expr :=
   | NatCast.natCast _ _ a => some a
   | _ => none
 
-/-- For each ℕ-cast atom in the current goal, add a hypothesis
-`(0 : ℝ) ≤ ↑a := Nat.cast_nonneg _`. -/
+/-- For each ℕ-cast atom in the current goal **or any local hypothesis**,
+add a hypothesis `(0 : ℝ) ≤ ↑a := Nat.cast_nonneg _`.
+
+Scanning hypotheses too matters when the ℕ-cast atom appears only in a
+constraint (e.g. `h : (n : ℝ) = x` with `n : ℕ`): `parseGoalAtomic` will
+later pick up the atom from the constraint, but without a `0 ≤ ↑n`
+hypothesis the SOS reifier loses the nonneg fact, causing search to
+fail on goals that are otherwise certifiable. -/
 def assertNatCastNonneg : TacticM Unit := withMainContext do
   let goal ← (← getMainGoal).getType >>= instantiateMVars
-  let atoms ← collectNatCastAtoms goal
+  let mut atoms ← collectNatCastAtoms goal
+  -- Also scan local-context hypothesis types so ℕ-casts that survive
+  -- only in `h : (n : ℝ) = …` style hypotheses still get their nonneg
+  -- fact.
+  let lctx ← Lean.getLCtx
+  for ldecl in lctx do
+    if ldecl.isImplementationDetail then continue
+    let ty ← instantiateMVars ldecl.type
+    if (← Meta.inferType ty).isProp then
+      atoms ← collectNatCastAtoms ty atoms
   trace[sos.lift] "assertNatCastNonneg: found {atoms.size} ℕ-cast atom(s)"
   for atom in atoms do
     let some natArg := natCastArg? atom | continue
@@ -242,17 +257,19 @@ The recursion handles the equality split: `le_antisymm` produces two
 subgoals which both need the rest of the pipeline. -/
 
 partial def liftToReal : TacticM Unit := withMainContext do
-  let mv ← getMainGoal
-  let goalOriginal ← mv.getType >>= instantiateMVars
-  trace[sos.lift] "liftToReal: starting on goal {goalOriginal}"
-  -- Out-of-scope ops are checked on the *original* goal Expr (before
-  -- any rify rewrites obscure the source-domain operators).
-  checkUnsupportedOps goalOriginal
-  -- Intro all leading numeric universal binders and hypothesis binders.
+  trace[sos.lift] "liftToReal: starting on goal {← (← getMainGoal).getType >>= instantiateMVars}"
+  -- Intro all leading numeric universal binders and hypothesis binders
+  -- before checking unsupported operators. Checking pre-intro would
+  -- reject theorems with `Nat.sub` etc. anywhere in the Π-type,
+  -- including unused hypothesis positions; the post-intro conclusion
+  -- is what the SOS reifier actually has to handle.
   introLeadingBindersAux
-  -- Re-fetch the goal after the intros.
   let mv ← getMainGoal
   let goal ← mv.getType >>= instantiateMVars
+  -- Out-of-scope ops are checked on the conclusion *after* intros but
+  -- *before* `rify`, since rify rewrites may obscure the source-domain
+  -- operators we want to detect.
+  checkUnsupportedOps goal
   let shape ← classifyConcl goal
   match shape with
   | .false_ | .other =>
@@ -291,6 +308,7 @@ partial def liftToReal : TacticM Unit := withMainContext do
     match d with
     | .real =>
       runRifyOnAll
+      if (← getGoals).isEmpty then return
       assertNatCastNonneg
     | .nat =>
       -- Discrete-strict rewrite: `a < b ↔ a + 1 ≤ b`. Then cast bridge.
