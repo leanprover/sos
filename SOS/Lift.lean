@@ -333,4 +333,115 @@ partial def liftToReal : TacticM Unit := withMainContext do
       if (← getGoals).isEmpty then return
       assertNatCastNonneg
 
+/-! ### Negate-and-refute path (Harrison's `INT_SOS` trick)
+
+For ℕ/ℤ goals that are not in the quadratic module of their constraint
+cone over ℝ — e.g. `∀ n : ℕ, n ≤ n*n`, which fails Putinar at the
+admissible real point `n = 0.5` — Harrison's `INT_SOS` negates the
+conclusion, applies the integer discreteness rewrite
+`¬ (a ≤ b) ⟺ b + 1 ≤ a`, and feeds the resulting system of ℤ-side
+≤-inequalities to a real infeasibility search. See
+https://github.com/jrh13/hol-light/blob/master/Examples/sos.ml#L1336
+for `INT_SOS`'s implementation.
+
+We mirror that here:
+
+  1. Intro leading numeric / hypothesis binders (same as `liftToReal`).
+  2. `by_contra hneg`, producing `hneg : ¬ <orig_conclusion>` and goal
+     `False`.
+  3. Push the negation into NNF via `simp only [not_le, not_lt,
+     Nat.lt_iff_add_one_le, Int.lt_iff_add_one_le] at hneg`. The result
+     has shape `c ≤ d` over ℕ/ℤ (possibly with a `+1` from the
+     discreteness rewrite).
+  4. `rify at *` casts everything to ℝ, then `assertNatCastNonneg` adds
+     `0 ≤ ↑a` for each ℕ-typed cast atom.
+  5. `replace hneg := sub_nonneg.mpr hneg` puts the refute hypothesis
+     into the `0 ≤ ↑d − ↑c` canonical form that `recogniseConstraint`
+     picks up.
+  6. The caller routes the `False` goal into the existing `.infeasible`
+     SOS arm via `parseGoalAtomic`.
+
+This branch is only attempted when the direct lift (which corresponds to
+asking for a Putinar certificate of the original inequality) fails to
+close the goal. We do not handle `=`-shape conclusions directly: those
+are split by the direct path via `le_antisymm`, and each ≤-subgoal can
+then take the refute branch on its own.
+
+Note: `≠`-shape conclusions, which Harrison handles via the disjunction
+`¬ (a = b) ⟺ a + 1 ≤ b ∨ b + 1 ≤ a`, are not supported here. The
+disjunction would require a case split before search, and the only
+canonical Harrison ℕ/ℤ test that exercises it (the `m * n ≠ 0` style)
+admits a much shorter `omega`-based proof. -/
+
+partial def refuteToReal : TacticM Unit := withMainContext do
+  trace[sos.lift] "refuteToReal: starting on goal {← (← getMainGoal).getType >>= instantiateMVars}"
+  introLeadingBindersAux
+  let mv ← getMainGoal
+  let goal ← mv.getType >>= instantiateMVars
+  checkUnsupportedOps goal
+  let shape ← classifyConcl goal
+  match shape with
+  | .eq α =>
+    -- Equality conclusion: split via `le_antisymm` and recurse on each
+    -- ≤-subgoal. The direct path does the same; here we recurse with
+    -- `refuteToReal` so that the refute branch covers both halves.
+    let some _ ← domainOf? α | return
+    evalTactic (← `(tactic| apply le_antisymm))
+    let goals ← getGoals
+    let mut newGoals : List MVarId := []
+    for g in goals do
+      setGoals [g]
+      refuteToReal
+      newGoals := newGoals ++ (← getGoals)
+    setGoals newGoals
+  | .le α | .lt α =>
+    let some d ← domainOf? α |
+      throwError "sos refute: unsupported conclusion domain"
+    match d with
+    | .nat =>
+      evalTactic (← `(tactic| by_contra hneg))
+      -- Apply the discreteness rewrite at `*` so that ℕ-typed `<`
+      -- hypotheses introduced earlier (e.g. `h : m < n`) also become
+      -- `m + 1 ≤ n` — otherwise rify turns them into ℝ-typed `<`
+      -- constraints, which `recogniseConstraint` downgrades to nonneg
+      -- (losing the strict integrality info) and breaks the search.
+      evalTactic (← `(tactic|
+        simp only [not_le, not_lt, Nat.lt_iff_add_one_le] at *))
+      finishRefute
+    | .int =>
+      evalTactic (← `(tactic| by_contra hneg))
+      evalTactic (← `(tactic|
+        simp only [not_le, not_lt, Int.lt_iff_add_one_le] at *))
+      finishRefute
+    | .rat | .real =>
+      -- Refute path adds nothing over the direct path for dense
+      -- (ℚ / ℝ) domains: there's no discreteness rewrite.
+      throwError "sos refute: not applicable to {repr d} conclusions"
+  | .false_ | .other =>
+    throwError "sos refute: unsupported conclusion shape"
+where
+  /-- Finish the refute branch: rify, add ℕ-nonneg hyps, and normalise
+  the negated hypothesis to `0 ≤ …` form for the constraint reifier. -/
+  finishRefute : TacticM Unit := do
+    if (← getGoals).isEmpty then return
+    runRifyOnAll
+    if (← getGoals).isEmpty then return
+    assertNatCastNonneg
+    -- `hneg : c ≤ d` (over ℝ after rify) → `hneg : 0 ≤ d − c`. Wrapped
+    -- in `try`: if the simp set above closed the hypothesis (e.g. by
+    -- reducing the negation to `False`), there's nothing to replace.
+    evalTactic (← `(tactic|
+      first
+        | (replace hneg := sub_nonneg.mpr hneg)
+        | skip))
+    -- `push_cast at *` normalises any lingering `Nat.cast` / `Int.cast`
+    -- subterms to a single canonical instance synthesis. Without this,
+    -- `↑n` produced by `rify` and `↑n` produced by `assertNatCastNonneg`
+    -- (via `mkAppOptM ``Nat.cast_nonneg`) can land on distinct
+    -- type-class instances (`Real.instNatCast` vs the one derived from
+    -- `AddMonoidWithOne.toNatCast`); the reifier's atom dedup runs at
+    -- `reducible` transparency and does not unify them, splitting `↑n`
+    -- across two atoms and breaking the search.
+    evalTactic (← `(tactic| try push_cast at *))
+
 end SOS.Lift
