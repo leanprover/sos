@@ -7,6 +7,7 @@ import SOS.Certificate
 import SOS.Verifier
 import SOS.LDL
 import SOS.RatSimplex
+import SOS.Symmetry
 import SOS.Search
 import SOS.Reify
 import SOS.Lift

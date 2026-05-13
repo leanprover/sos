@@ -68,10 +68,19 @@ example (x y z : ℝ) :
         (x^4*y^2 + x^2*y^4 + z^6 - 3*x^2*y^2*z^2) := by sos
 
 -- FIXME sos.ml:1819 — 3-variable degree-4 with linear+constant tail.
--- Surprising failure given the modest degree; likely a rounding miss
--- on the Gram matrix (the polynomial is bounded below by ≈ 1.59).
--- Newton pruning (#23) doesn't move it. Confirmed failing through
--- `maxDepth := 2`.
+-- Fully `S₃`-symmetric; variable-permutation symmetry detection (#37)
+-- now feeds Gram-symmetry constraints to CSDP, and the returned Gram
+-- is visibly symmetric (e.g. all of `Q[0, x²]`, `Q[0, y²]`, `Q[0, z²]`
+-- collapse to the same float `-0.788347…`). A small rational symmetric
+-- Gram does exist: in the basis order `1, x, x², y, xy, y², z, xz, yz,
+-- z²`, the orbit-rep vector `[3, 1/2, -1/2, -1/3, 1, 0, 1/3, 0, 0,
+-- -2/3, 1, 0, -1/3, 0, 2/3, 0]` is PSD and certifies. But CSDP picks
+-- a different point in the 5-DOF affine nullspace (after the 11
+-- monomial-orbit equalities partition the 16 Gram orbits), and that
+-- point is irrational. Entry-wise rounding can't snap from CSDP's
+-- interior point to the rational corner; closing this needs a
+-- symmetry-aware rounder that searches rationals in the 5-DOF
+-- nullspace, not just in single-entry-denom space.
 -- example (x y z : ℝ) :
 --     0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 := by sos
 

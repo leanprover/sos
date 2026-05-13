@@ -38,6 +38,7 @@ closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
 import SOS.Certificate
 import SOS.LDL
 import SOS.RatSimplex
+import SOS.Symmetry
 import LeanCsdp
 
 namespace SOS.Search
@@ -387,7 +388,8 @@ blocks zero weight — otherwise the objective drives `x⁺` and `x⁻` to
 infinity together. -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := [])
-    (extraDeg : Nat := 0) (strategy : BasisStrategy := .dense) :
+    (extraDeg : Nat := 0) (strategy : BasisStrategy := .dense)
+    (symmetries : Array (Array Nat) := #[]) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
       Array (CMvMonomial n) × Option Nat :=
   let σBlocks := buildBlocks target gs ps extraDeg strategy
@@ -470,7 +472,36 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
                 monos := monos.push m
           cachedEq := cachedEq.push { eqIdx, basisIdx := b, support }
       return (cached, cachedEq, monos, monoIndex)
-  let b : Array Float := monos.map fun m => ratToFloat (target.coeff m)
+  -- σ₀ Gram-symmetry constraints. For each π in `symmetries`, lift π
+  -- to a permutation π̂ on σ₀ basis indices, then union the orbits of
+  -- unordered pairs `(i, j)` of basis indices under all `π̂`. Each
+  -- non-root pair gets one CSDP equality `Q[i,j] − Q[root] = 0` on
+  -- the σ₀ block (block 1). CSDP's `op_a` doubles off-diagonal
+  -- entries against symmetric `X`, so `+1` on `(i, j)` and `−1` on
+  -- the root produces `2·X[i,j] − 2·X[root] = 0`; with `b = 0` the
+  -- factor of 2 is harmless. Identity-only symmetry → no orbits → no
+  -- constraints (no overhead).
+  let symConstraints : Array ((Nat × Nat) × (Nat × Nat)) := Id.run do
+    if symmetries.isEmpty ∨ σBlocks.size = 0 then
+      return #[]
+    let σ₀basis := σBlocks[0]!.basis
+    if σ₀basis.size = 0 then return #[]
+    let mut basisIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
+    for i in [0:σ₀basis.size] do
+      basisIndex := basisIndex.insert σ₀basis[i]! i
+    let mut basisPerms : Array (Array Nat) := #[]
+    for π in symmetries do
+      match SOS.Symmetry.basisPermutation π σ₀basis basisIndex with
+      | some bp => basisPerms := basisPerms.push bp
+      | none    => pure ()
+    return SOS.Symmetry.gramSymmetryConstraints σ₀basis.size basisPerms
+  let symConstraintCount : Nat := symConstraints.size
+  let baseConstraintCount : Nat := monos.size
+  let b : Array Float := Id.run do
+    let mut b : Array Float := monos.map fun m => ratToFloat (target.coeff m)
+    for _ in [0:symConstraintCount] do
+      b := b.push 0.0
+    return b
   let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
     let mut acc : Array LeanCsdp.ConstraintTriple := #[]
     for cp in cached do
@@ -509,6 +540,24 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
         { constraint := UInt32.ofNat (constMonoIdx + 1)
           block := UInt32.ofNat (lambdaBlockIdx + 1)
           row := 1, col := 1, value := 1.0 }
+    -- σ₀ Gram-symmetry constraints emitted on block 1 (σ₀). Each entry
+    -- contributes two CSDP triples sharing the same `constraint` index:
+    -- `+1` on `(i, j)` and `−1` on `(root_i, root_j)`.
+    for sIdx in [0:symConstraints.size] do
+      let ((i, j), (ri, rj)) := symConstraints[sIdx]!
+      let cIdx : Nat := baseConstraintCount + sIdx + 1
+      acc := acc.push
+        { constraint := UInt32.ofNat cIdx
+          block := 1
+          row := UInt32.ofNat (i + 1)
+          col := UInt32.ofNat (j + 1)
+          value := 1.0 }
+      acc := acc.push
+        { constraint := UInt32.ofNat cIdx
+          block := 1
+          row := UInt32.ofNat (ri + 1)
+          col := UInt32.ofNat (rj + 1)
+          value := -1.0 }
     return acc
   -- Cost matrix: trace cost on σ-blocks only. The cofactor LP blocks
   -- must have zero cost — `tr` would drive `x⁺` and `x⁻` to infinity
@@ -795,9 +844,12 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (useTraceCost : Bool) (extraDeg : Nat)
     (strategy : BasisStrategy := .dense)
-    (maxRoundingDenom : Nat := 1048576) : IO (Option (Certificate n)) := do
+    (maxRoundingDenom : Nat := 1048576)
+    (symmetries : Array (Array Nat) := #[]) :
+    IO (Option (Certificate n)) := do
   let (problem, blocks, eqSpecs, _monos, _) :=
     buildSdp target gs (.feasibility useTraceCost) ps extraDeg strategy
+      symmetries
   if problem.b.size = 0 then
     if target = 0 then
       return some { sigma0 := { squares := [] },
@@ -884,6 +936,15 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   let pruneAllowed : Bool := match goal with
     | .infeasible => false
     | _           => basisStrategy ≠ .dense
+  -- Detect variable-permutation symmetries of the problem once.
+  -- `target = -1` (infeasibility) is fixed by every permutation, so the
+  -- detected group reduces to the joint stabiliser of the `gᵢ`/`pⱼ` —
+  -- still the right notion. Capped at `n ≤ maxSymmetryArity`
+  -- (`SOS.Symmetry.allPermutations` returns just the identity above the
+  -- cap), so the cost is bounded by `5! × (1 + |gs| + |ps|)` polynomial
+  -- equality checks.
+  let symmetries : Array (Array Nat) :=
+    SOS.Symmetry.detectSymmetries target gs ps
   for extraDeg in [0:maxDepth + 1] do
     let basisDeg := halfCeil σ₀Deg + extraDeg
     let fullBasisSize := (monomialsUpTo n basisDeg).size
@@ -907,7 +968,7 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     for strat in basisStrategies do
       for useTraceCost in costStrategies do
         if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
-            strat maxRoundingDenom then
+            strat maxRoundingDenom symmetries then
           return some cert
   return none
 
@@ -962,13 +1023,18 @@ def runStrict (p : CMvPolynomial n ℚ)
   -- necessary — it re-tries depths `0..extraDeg-1` on each `(ε,
   -- extraDeg)` pair. Bounded redundancy; acceptable for the simpler
   -- driver structure.
+  -- LP-slack pass benefits from the same symmetry constraints: the
+  -- λ* readout is more reliable when CSDP has the structured Gram to
+  -- work with.
+  let symmetries : Array (Array Nat) :=
+    SOS.Symmetry.detectSymmetries p gs ps
   for extraDeg in [0:maxDepth + 1] do
     -- The LP-slack pass uses the `.dense` σ₀ basis. The slack solve
     -- estimates `λ*`; dense is more robust against degeneracy and
     -- the gain from pruning here is small compared to the inner
     -- feasibility loops, which do honour `basisStrategy`.
     let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
-      buildSdp p gs .lpSlack ps extraDeg
+      buildSdp p gs .lpSlack ps extraDeg (symmetries := symmetries)
     let some lambdaBlockIdx := lambdaBlockIdx? | return none
     -- Same pre-CSDP conditioning as `tryOneSdp`. `λ` lives in a primal
     -- block of `sol.X`, so it scales with `X*` and `unscaleSolution`
