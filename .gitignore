@@ -1,1 +1,17 @@
+# Lean/Lake build outputs
 /.lake/
+/.lake-packages/
+*.olean
+*.ilean
+*.c
+*.o
+*.so
+*.dylib
+*.dll
+
+# Local editor and OS files
+.DS_Store
+*~
+*.swp
+*.swo
+

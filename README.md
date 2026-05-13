@@ -6,14 +6,6 @@ Harrison's sum-of-squares decision procedure for nonlinear real
 arithmetic, in Lean 4. Based on the design from
 [Harrison 2007 (TPHOLs)](https://link.springer.com/chapter/10.1007/978-3-540-74591-4_9).
 
-This tactic depends on
-[`Verified-zkEVM/CompPoly`](https://github.com/Verified-zkEVM/CompPoly)
-for a kernel-decidable computational multivariate-polynomial type
-(`CMvPolynomial n ℚ`), which is what the verifier reduces certificate
-checks against. CompPoly itself depends on Mathlib. As a consequence,
-`sos` is a downstream library and cannot be migrated into Mathlib
-itself unless CompPoly is upstreamed first.
-
 ## Status
 
 The `by sos` tactic closes nonlinear-real-arithmetic goals end-to-end:
@@ -94,6 +86,16 @@ Harrison's [TPHOLs 2007 paper]
   zero. Our `SOS.LDL.decompose` does this; `LDL.reconstruct` already
   drops the zero-D contributions.
 
+## Implementation notes
+
+This tactic depends on
+[`Verified-zkEVM/CompPoly`](https://github.com/Verified-zkEVM/CompPoly)
+for a kernel-decidable computational multivariate-polynomial type
+(`CMvPolynomial n ℚ`), which is what the verifier reduces certificate
+checks against. CompPoly itself depends on Mathlib. As a consequence,
+`sos` is a downstream library and cannot be migrated into Mathlib
+itself unless CompPoly is upstreamed first.
+
 ## Scope and limits
 
 - **Rational certificates only.** Witnesses live in
@@ -144,6 +146,10 @@ Harrison's [TPHOLs 2007 paper]
 
 ## Building and testing
 
+This repository is pinned to the Lean version in
+[`lean-toolchain`](lean-toolchain); dependencies are pinned by
+[`lake-manifest.json`](lake-manifest.json).
+
 ```
 git clone https://github.com/kim-em/sos
 cd sos
@@ -182,6 +188,7 @@ The tactic runs three stages on a `by sos` goal:
 | `SOS.Reify` | Atom-collecting Lean-`Expr` walker → `ParsedGoal` (atom array, untyped `SOS.Poly.Raw` for conclusion + constraints, hypothesis FVars). |
 | `SOS.Tactic` | `by sos` (search-driven) and `by sos_witness <cert>` elaborators. |
 | `SOSTest.Examples` | Worked examples invoking the tactic; serves as the `lake test` driver. |
+| `SOSTest.Showcase` | Curated launch/demo examples that are also covered by `lake test`. |
 
 ## Dependencies
 
@@ -200,6 +207,11 @@ System dependencies (BLAS/LAPACK, transitively via lean-csdp):
 | Windows  | MSYS2 mingw-w64 with `mingw-w64-x86_64-openblas` |
 
 CI runs Linux-only.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development workflow and
+test expectations.
 
 ## Licence
 

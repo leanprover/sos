@@ -17,6 +17,10 @@ def blasLapackLinkArgs : Array String :=
       "-llapack", "-lblas", "-l:libgfortran.so.5", "-lm"]
 
 package sos where
+  version := v!"0.1.0"
+  description := "A Lean 4 sum-of-squares tactic for nonlinear real arithmetic."
+  keywords := #["math", "software-verification", "tactic", "real-arithmetic", "sos", "sdp"]
+  license := "Apache-2.0"
   leanOptions := #[⟨`autoImplicit, false⟩]
 
 require leanCsdp from git

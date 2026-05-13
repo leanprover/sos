@@ -7,3 +7,4 @@ import SOSTest.Examples
 import SOSTest.Harrison
 import SOSTest.Internal
 import SOSTest.RatSimplexTests
+import SOSTest.Showcase
