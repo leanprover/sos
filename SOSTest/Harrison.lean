@@ -137,6 +137,11 @@ example (x y z w : ℝ) :
 
 /-! ### `REAL_SOS` with Putinar-style hypotheses -/
 
+-- sos.ml:1623 shape (issue #50) — linear strict-strict goal. The exact
+-- affine strict path closes this before the SDP search.
+example (x a : ℝ) (_h1 : 3*x + 7*a < 4) (_h2 : 3 < 2*x) :
+    a < 0 := by sos
+
 -- sos.ml:1718 — `0 ≤ x ∧ 0 ≤ y ⇒ x*y*(x+y)² ≤ (x²+y²)²`
 example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
     0 ≤ (x^2 + y^2)^2 - x*y*(x + y)^2 := by sos

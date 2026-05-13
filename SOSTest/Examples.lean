@@ -131,6 +131,11 @@ example (x : ℝ) (_h : x < 1) : 0 ≤ 1 - x := by sos
 -- Strict variable-vs-variable form: `h : x < y → 0 ≤ y − x`.
 example (x y : ℝ) (_h : x < y) : 0 ≤ y - x := by sos
 
+-- Affine strict-strict goals are discharged by an exact rational LP
+-- fast path, avoiding the SDP search entirely (issue #50).
+example (x a : ℝ) (_h1 : 3*x + 7*a < 4) (_h2 : 3 < 2*x) :
+    a < 0 := by sos
+
 /-! ## §5. Equality hypotheses
 
 The certificate gains a free polynomial cofactor `qⱼ` per equality
