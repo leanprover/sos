@@ -3,9 +3,12 @@ Copyright (c) 2026 Kim Morrison. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 
 Test cases for the ℕ/ℤ DIV/MOD enrichment of the integer frontend
-(issue #24). Each goal contains `a / b` or `a % b` over ℕ or ℤ with
-positive literal divisor; the lift pre-pass introduces witness
-equalities and bounds before the SOS reifier runs.
+(issues #24 and #45). Each goal contains `a / b` or `a % b` over ℕ
+or ℤ; the lift pre-pass introduces witness equalities and bounds
+before the SOS reifier runs. The leading block covers positive
+literal divisors (issue #24); the trailing block (after the
+non-literal-divisor section header) covers divisors whose positivity
+is derived from in-scope hypotheses via `omega` (issue #45).
 -/
 import SOS
 
@@ -63,14 +66,83 @@ example : ∀ n : ℕ, 0 ≤ n / 2 → 0 ≤ n / 2 + n / 2 + n / 2 := by sos
 -- previously-introduced witness hypotheses.
 example : ∀ n : ℕ, n % 2 + 2 * (n / 2) = n := by sos
 
--- Non-literal divisor remains an opaque atom — the witness equality
--- isn't introduced because the divisor isn't a positive literal, so
--- the search has nothing to certify against and the tactic fails.
--- The error path is intentionally a search failure, not a hard
--- precondition rejection, so the user can still write the dividend
--- as a literal expression at the call site if needed.
+-- Non-literal divisor with no positivity hypothesis in scope: the
+-- unconditional witnesses (`n · (m/n) + m%n = m` and `m%n ≥ 0`) are
+-- still introduced, but the strict bound `m%n < n` is skipped because
+-- `omega` can't prove `0 < n`. The goal `m / n ≤ m` is false at the
+-- real point `n := 0, m := 0, m/n := 1, m%n := 0` (consistent with
+-- the unconditional witnesses), so the search correctly fails.
 example : True := by
   fail_if_success
     (have : ∀ m n : ℕ, m / n ≤ m := by sos)
   trivial
+
+/-! ### Non-literal divisor enrichment (issue #45)
+
+When the divisor is not a positive literal, `enrichDivMod` introduces
+the unconditional div/mod identity and remainder ≥ 0 witnesses, and
+routes the strict bound `r < n` through `omega` on the divisor
+positivity (over the source domain). Sites whose positivity is
+derivable from the local context — a `n ≠ 0` / `0 < n` / `m < n`
+hypothesis — get the full witness suite; sites whose positivity isn't
+provable get only the unconditional facts. The omega-derived `0 < n`
+is local to the `by` block: it's used to discharge `Nat.mod_lt` /
+`Int.emod_lt_of_pos`, not added as a separate ℝ-cast hypothesis.
+
+Harrison's `sos.ml:1729` lands directly on the unconditional ℕ path
+(no positivity hypothesis needed). The remaining `:1726`, `:1727`,
+`:1730`, `:1731` examples enrich correctly but their natural
+certificates require products of inequality constraints (e.g.
+`n · (m/n) ≥ 0` derived from `n ≥ 0 ∧ m/n ≥ 0`), which is a
+Schmüdgen-preordering certificate rather than a Putinar one — out of
+scope until #38 lands. See the FIXME blocks below for the per-case
+diagnoses. -/
+
+-- sos.ml:1729 — `n · (m / n) ≤ m`. Holds unconditionally over ℕ:
+-- `n · (m/n) = m - m%n ≤ m`. The unconditional witnesses (div/mod
+-- identity and `0 ≤ m%n`) give a direct Putinar cert.
+example : ∀ m n : ℕ, n * (m / n) ≤ m := by sos
+
+-- ℤ companion: with `0 < n` in scope, `omega` discharges the
+-- divisor-positivity sides of `Int.emod_nonneg` / `Int.emod_lt_of_pos`
+-- and the same cert closes the goal.
+example : ∀ m n : ℤ, 0 < n → n * (m / n) ≤ m := by sos
+
+-- Focused tests for the optional positivity-guarded witnesses.
+-- Each one directly exercises the `omega`-derived bound that
+-- `enrichSite` adds for non-literal divisors and would silently
+-- regress if the soft-failed witness intros stopped firing.
+
+-- ℕ strict bound from `n ≠ 0`: the witness `0 ≤ n - (m%n) - 1` is
+-- precisely what's needed (the rest is `Nat.cast_lt` on the
+-- conclusion).
+example : ∀ m n : ℕ, n ≠ 0 → m % n < n := by sos
+
+-- ℤ remainder ≥ 0 from `n ≠ 0`: directly the `hnn` witness.
+example : ∀ m n : ℤ, n ≠ 0 → 0 ≤ m % n := by sos
+
+-- ℤ strict bound from `0 < n`: directly the `hgap` witness.
+example : ∀ m n : ℤ, 0 < n → m % n < n := by sos
+
+-- FIXME sos.ml:1726 — `n ≠ 0 ⇒ 0 % n = 0`. With the strict bound
+-- `n - (0%n) - 1 ≥ 0` in scope the cert needs `n · (0/n) ≥ 0`, a
+-- product of two non-negative atoms, which Putinar can't form
+-- without Schmüdgen preordering (#38).
+-- example : ∀ n : ℕ, n ≠ 0 → 0 % n = 0 := by sos
+
+-- FIXME sos.ml:1730 — `n ≠ 0 ⇒ 0 / n = 0`. Same preordering
+-- obstruction as 1726.
+-- example : ∀ n : ℕ, n ≠ 0 → 0 / n = 0 := by sos
+
+-- FIXME sos.ml:1727 — `m < n ⇒ m / n = 0`. Refute path turns it
+-- into `m/n ≥ 1 ∧ m + 1 ≤ n ⇒ False`, which needs the multiplicative
+-- step `n · (m/n) ≥ n` (i.e. constraint product `n · (m/n - 1) ≥ 0`).
+-- example : ∀ m n : ℕ, m < n → m / n = 0 := by sos
+
+-- FIXME sos.ml:1731 — `p ≠ 0 ∧ m ≤ n ⇒ m / p ≤ n / p`. Two DIV
+-- sites with the same non-literal divisor `p`; both get the full
+-- witness suite from `omega`. The natural refutation chains
+-- `p · (m/p - n/p - 1) ≥ p` against `m - n ≤ 0`, again a Schmüdgen
+-- product.
+-- example : ∀ m n p : ℕ, p ≠ 0 → m ≤ n → m / p ≤ n / p := by sos
 
