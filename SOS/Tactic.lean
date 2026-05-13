@@ -755,9 +755,19 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
       | none =>
         throwError "{tag}: search failed to find a strict-positivity certificate"
       | some res =>
-        let decompiled := decompileCertificate res.cert
+        -- Skip the `sos?` suggestion on this path: the strict-product
+        -- certificate would need to carry the `exponent` for
+        -- `sos_witness` to replay it, but the current witness syntax
+        -- only accepts the `ε`-form for strict goals. A clickable
+        -- suggestion that fails on replay is worse than no suggestion;
+        -- emit a hint instead and leave proper witness syntax to a
+        -- follow-up. The proof still closes through `closeSosStrictProduct`.
         if let some tk := suggest? then
-          emitSosSuggestion tk (formatDecompiledCertificate decompiled) none
+          let sugg : Lean.Meta.Tactic.TryThis.Suggestion :=
+            { suggestion := .string
+                "sos -- strict-product cert (no inline `sos_witness` replay yet)" }
+          Lean.Meta.Tactic.TryThis.addSuggestion tk sugg
+        let decompiled := decompileCertificate res.cert
         let certE ← certExprOfDecompiled n decompiled
         closeSosStrictProduct parsed certE res.exponent
 
