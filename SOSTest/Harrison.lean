@@ -248,6 +248,13 @@ example : True := by
 example (x y : ℝ) (_h : x*y = 1) :
     0 ≤ x^2 + y^2 - x*y*(x + y) := by sos
 
+-- sos.ml:1710 — `0 ≤ x ∧ 0 ≤ y ∧ x*y = 1 ⇒ x + y ≤ x² + y²`. Harrison's
+-- original form; the companion 1714 above drops the `0 ≤ x, 0 ≤ y`
+-- hypotheses. Conclusion is written in the natural `a ≤ b` shape; the
+-- reifier rewrites it as `0 ≤ b − a` via the sub-bridge.
+example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_h : x*y = 1) :
+    x + y ≤ x^2 + y^2 := by sos
+
 /-! ### Negate-and-refute path (Harrison's `INT_SOS` trick)
 
 ℕ/ℤ goals whose polynomial inequality is *not* a Putinar consequence of
@@ -279,3 +286,8 @@ example : True := by
   fail_if_success
     (have : ∀ n : ℕ, n * n ≤ n := by sos)
   trivial
+
+-- sos.ml:1725 — `∀ m n : ℕ. 2·m + n = (n + m) + m`. Pure ring identity
+-- over ℕ; exercises the ℕ-lift pre-pass on a degenerate (no SOS work
+-- needed) equality goal.
+example : ∀ m n : ℕ, 2*m + n = (n + m) + m := by sos
