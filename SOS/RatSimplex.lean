@@ -98,7 +98,7 @@ private def step (tab : Array (Array ℚ)) (basis : Array Nat)
 /-- Outcome of Phase-1 simplex. Tableau is returned only on `.optimal`
 so the caller can read the objective from `tab[0][nCols-1]`. -/
 private inductive Phase1Outcome where
-  | optimal (tab : Array (Array ℚ))
+  | optimal (tab : Array (Array ℚ)) (basis : Array Nat)
   | unbounded
   /-- Pivot budget exhausted. Bland's rule terminates in at most
   `C(nVars + rows, rows)` iterations, so this only fires on
@@ -112,24 +112,27 @@ private def runPhase1 : Nat → Array (Array ℚ) → Array Nat → Nat → Nat 
   | 0, _, _, _, _ => .exhausted
   | fuel + 1, tab, basis, rows, nVars =>
     match step tab basis rows nVars with
-    | .optimal => .optimal tab
+    | .optimal => .optimal tab basis
     | .unbounded => .unbounded
     | .progress tab' basis' => runPhase1 fuel tab' basis' rows nVars
 
-/-- Test feasibility of the equality LP `A x = b, x ≥ 0` exactly over
-`ℚ`. `A` has `b.size` rows; rows of `A` whose length differs from the
-common column count return `false`. -/
-def isFeasibleEqLP (A : Array (Array ℚ)) (b : Array ℚ) : Bool := Id.run do
+/-- Return one feasible solution of the equality LP `A x = b, x ≥ 0`,
+exactly over `ℚ`, if one is found. `A` has `b.size` rows; rows of `A`
+whose length differs from the common column count return `none`. -/
+def findFeasibleEqLP? (A : Array (Array ℚ)) (b : Array ℚ) :
+    Option (Array ℚ) := Id.run do
   let rows := b.size
-  if rows = 0 then return true
-  if A.size ≠ rows then return false
+  if rows = 0 then
+    if A.size = 0 then return some #[]
+    else return none
+  if A.size ≠ rows then return none
   let nVars := A[0]!.size
   -- Build the constraint rows with `b ≥ 0` normalisation in one pass.
   let mut Ab : Array (Array ℚ) := Array.mkEmpty rows
   let mut bs : Array ℚ := Array.mkEmpty rows
   for i in [0:rows] do
     let row₀ := A[i]!
-    if row₀.size ≠ nVars then return false
+    if row₀.size ≠ nVars then return none
     if b[i]! < 0 then
       let mut neg : Array ℚ := Array.mkEmpty nVars
       for j in [0:nVars] do neg := neg.push (-(row₀[j]!))
@@ -173,8 +176,21 @@ def isFeasibleEqLP (A : Array (Array ℚ)) (b : Array ℚ) : Bool := Id.run do
   -- `.dense` fallback still recovers).
   let fuel := (nVars + rows + 1) ^ 3 * 4 + 4096
   match runPhase1 fuel tab basis rows nVars with
-  | .optimal final => final[0]![nCols - 1]! == 0
-  | .unbounded => false
-  | .exhausted => false
+  | .optimal final finalBasis =>
+    if final[0]![nCols - 1]! != 0 then return none
+    let mut sol : Array ℚ := Array.replicate nVars 0
+    for i in [0:rows] do
+      let v := finalBasis[i]!
+      if v < nVars then
+        sol := sol.set! v final[i+1]![nCols - 1]!
+    return some sol
+  | .unbounded => none
+  | .exhausted => none
+
+/-- Test feasibility of the equality LP `A x = b, x ≥ 0` exactly over
+`ℚ`. `A` has `b.size` rows; rows of `A` whose length differs from the
+common column count return `false`. -/
+def isFeasibleEqLP (A : Array (Array ℚ)) (b : Array ℚ) : Bool :=
+  (findFeasibleEqLP? A b).isSome
 
 end SOS.RatSimplex

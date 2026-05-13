@@ -1306,6 +1306,93 @@ private def readLambda (sol : CSDP.Solution) (lambdaBlockIdx : Nat) :
   | some (.diag _ entries) => if entries.size > 0 then entries.get! 0 else 0.0
   | none => 0.0
 
+/-- Constant SOS multiplier from a non-negative rational, represented
+as at most four constant polynomial squares. -/
+private def constSOS? (r : ℚ) : Option (SOSDecomp n) := do
+  let roots ← LDL.fourSquaresRat r
+  return { squares := roots.map fun c => CMvPolynomial.C c }
+
+/-- Return the affine coefficient vector and constant term of `p`, or
+`none` if `p` has a monomial of degree at least two. -/
+private def affineCoeffs? (p : CMvPolynomial n ℚ) :
+    Option (Array ℚ × ℚ) := Id.run do
+  let mut coeffs : Array ℚ := Array.replicate n 0
+  let mut const : ℚ := 0
+  for m in p.monomials do
+    let c := p.coeff m
+    let mut deg : Nat := 0
+    let mut idx? : Option Nat := none
+    for i in [0:n] do
+      let e := m[i]!
+      deg := deg + e
+      if e == 1 then idx? := some i
+    if deg == 0 then
+      const := const + c
+    else if deg == 1 then
+      let some i := idx? | return none
+      coeffs := coeffs.set! i (coeffs[i]! + c)
+    else
+      return none
+  return some (coeffs, const)
+
+/-- Exact rational fast path for affine strict goals. For a candidate
+`ε`, solve
+
+`p - ε = μ + Σᵢ λᵢ gᵢ`, with `μ, λᵢ ≥ 0`,
+
+as an equality LP over `ℚ`. This covers linear strict-strict cases
+without entering CSDP. -/
+private def tryAffineStrict (p : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
+    (maxRoundingDenom : Nat) : Option (StrictResult n) := Id.run do
+  if !ps.isEmpty then return none
+  let some (pCoeffs, pConst) := affineCoeffs? p | return none
+  let mut gData : Array (Array ℚ × ℚ) := Array.mkEmpty gs.length
+  for g in gs do
+    let some data := affineCoeffs? g | return none
+    gData := gData.push data
+  -- We only need some positive slack, not the largest one. Starting
+  -- with large candidates repeats the original failure mode in exact
+  -- simplex form: infeasible affine LPs can be much slower than the
+  -- feasible small-slack case. `1/16` is conservative for common
+  -- hand-scale examples, and the schedule then moves monotonically
+  -- smaller.
+  for k in [4:21] do
+    let denom : Nat := 2 ^ k
+    if maxRoundingDenom < denom then continue
+    let ε : ℚ := 1 / (denom : ℚ)
+    if hε : 0 < ε then
+      let nVars := gs.length + 1
+      let mut A : Array (Array ℚ) := Array.mkEmpty (n + 1)
+      let mut b : Array ℚ := Array.mkEmpty (n + 1)
+      let mut constRow : Array ℚ := Array.mkEmpty nVars
+      for i in [0:gs.length] do
+        constRow := constRow.push (gData[i]!.2)
+      constRow := constRow.push 1
+      A := A.push constRow
+      b := b.push (pConst - ε)
+      for j in [0:n] do
+        let mut row : Array ℚ := Array.mkEmpty nVars
+        for i in [0:gs.length] do
+          row := row.push (gData[i]!.1[j]!)
+        row := row.push 0
+        A := A.push row
+        b := b.push (pCoeffs[j]!)
+      let some sol := RatSimplex.findFeasibleEqLP? A b | continue
+      let some sigma0 ← constSOS? (sol[gs.length]!) | continue
+      let mut sigmas : Array (List Nat × SOSDecomp n) := #[([], sigma0)]
+      let mut ok := true
+      for i in [0:gs.length] do
+        match constSOS? (sol[i]!) with
+        | some sigma => sigmas := sigmas.push ([i], sigma)
+        | none => ok := false
+      if !ok then continue
+      let cert : Certificate n := { sigmas := sigmas.toList, eqCofs := [] }
+      let goal : Goal n := .strict p ε hε
+      if cert.checks goal gs ps then
+        return some { cert, ε, hε }
+  return none
+
 /-- Strict-positivity search via LP-slack maximisation. CSDP discovers
 `λ*`, the largest slack admissible at this relaxation level. We then
 try `ε = 2^-k` for `k` chosen so that `2^-k ≲ λ*`, descending until a
@@ -1321,6 +1408,8 @@ def runStrict (p : CMvPolynomial n ℚ)
     (basisStrategy : BasisStrategy := .newton)
     (maxSubsetCardinality : Nat := 1) :
     IO (Option (StrictResult n)) := do
+  if let some cert := tryAffineStrict p gs ps maxRoundingDenom then
+    return some cert
   -- Iteratively deepen alongside `runFeasibilitySearch`: each outer
   -- pass re-runs the LP-slack solve at the higher relaxation. Each
   -- LP-slack solve generally returns a different `λ*` (and thus a
@@ -1347,9 +1436,11 @@ def runStrict (p : CMvPolynomial n ℚ)
     let sol := unscaleSolution sol xShift
     let lambdaStar := readLambda sol lambdaBlockIdx
     if lambdaStar ≤ 0.000000001 then continue
-    -- Find the smallest k such that 2^-k ≤ 2·λ*. The factor-2 slack
-    -- means CSDP returning `λ* = 0.999...` for a true optimum of 1
-    -- still starts at k = 0 (ε = 1).
+    -- Find the smallest k such that 2^-k ≤ 2·λ*. The exact affine
+    -- fast path above handles the linear strict-strict cases where an
+    -- infeasible overshoot is dangerous; for the remaining SDP path,
+    -- the original tolerance helps when CSDP reports a value just below
+    -- a clean power of two.
     let mut bound : Float := 1.0
     let mut k : Nat := 0
     let mut bail := false
