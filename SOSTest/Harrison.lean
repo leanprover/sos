@@ -67,13 +67,9 @@ example (x y z : ℝ) :
     0 ≤ (x^2 + y^2 + z^2) *
         (x^4*y^2 + x^2*y^4 + z^6 - 3*x^2*y^2*z^2) := by sos
 
--- FIXME sos.ml:1819 — 3-variable degree-4 with linear+constant tail.
--- Surprising failure given the modest degree; likely a rounding miss
--- on the Gram matrix (the polynomial is bounded below by ≈ 1.59).
--- Newton pruning (#23) doesn't move it. Confirmed failing through
--- `maxDepth := 2`.
--- example (x y z : ℝ) :
---     0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 := by sos
+-- sos.ml:1819 — 3-variable degree-4 with linear+constant tail.
+example (x y z : ℝ) :
+    0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 := by sos
 
 -- FIXME sos.ml:1829 — 100·sum-of-squares − 588. The unsubtracted form
 -- is trivially SOS; subtracting 588 forces the search to find a
@@ -101,10 +97,9 @@ example (x : ℝ) :
     0 ≤ 2*x^14 - 84*x^12 + 1022*x^10 - 2968*x^8
         + 3038*x^6 - 980*x^4 + 98*x^2 := by sos
 
--- FIXME sos.ml:1840 — strict `≥ 1/7` bound on the 1819 polynomial.
--- Fails for the same reason as 1819.
--- example (x y z : ℝ) :
---     0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 - 1/7 := by sos
+-- sos.ml:1840 — strict `≥ 1/7` bound on the 1819 polynomial.
+example (x y z : ℝ) :
+    0 ≤ x^4 + y^4 + z^4 - 4*x*y*z + x + y + z + 3 - 1/7 := by sos
 
 /-! ### Zeng et al. (JSC 37, 2004) — Harrison's PURE_SOS battery -/
 
@@ -130,14 +125,10 @@ example (x y z : ℝ) :
         + 2*x^2*y^3*z - 4*x^3*y^2*z^3 + 2*x^4*y*z^5
         + z^2*y^2 - 2*z^4*y*x + z^6*x^2 := by sos
 
--- FIXME sos.ml:1886 — 4-variable degree-4, with cross-terms
--- `2*x*y*z^2 + 2*x*y*w^2`. The dense σ₀ basis has 15 monomials
--- (`C(4+2, 2)`); the SDP solves but rounding misses, and the target
--- isn't sparse enough for Newton pruning (#23) to fire. Confirmed
--- failing through `maxDepth := 2`.
--- example (x y z w : ℝ) :
---     0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
---         + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
+-- sos.ml:1886 — 4-variable degree-4, with `Z₂×Z₂` symmetry.
+example (x y z w : ℝ) :
+    0 ≤ x^4 + 4*x^2*y^2 + 2*x*y*z^2 + 2*x*y*w^2 + y^4 + z^4 + w^4
+        + 2*z^2*w^2 + 2*x^2*w + 2*y^2*w + 2*x*y + 3*w^2 + 2*z^2 + 1 := by sos
 
 -- sos.ml:1891 — 4-variable degree-6
 example (x y z w : ℝ) :
