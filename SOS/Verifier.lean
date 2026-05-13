@@ -158,33 +158,47 @@ theorem SOSDecomp.toPoly_aeval_nonneg (sd : SOSDecomp n) (φ : Fin n → ℝ) :
     rw [List.foldr_cons, CMvPolynomial.aeval_add]
     exact add_nonneg ih (aeval_sq_nonneg φ q)
 
-/-- The constraint sum `Σᵢ σᵢ.toPoly * gᵢ` evaluates non-negatively when
-each `gᵢ` does. -/
-theorem Certificate.constraintSum_aeval_nonneg
-    (sigmas : List (SOSDecomp n)) (gs : List (CMvPolynomial n ℚ))
-    (φ : Fin n → ℝ)
+/-- The product `∏_{i ∈ idxs} gs[i]` (or `1` for out-of-bounds entries)
+evaluates non-negatively when every `gᵢ` does. -/
+theorem Certificate.constraintProduct_aeval_nonneg
+    (gs : List (CMvPolynomial n ℚ)) (idxs : List Nat) (φ : Fin n → ℝ)
     (hgs : ∀ g ∈ gs, 0 ≤ CMvPolynomial.aeval φ g) :
-    0 ≤ CMvPolynomial.aeval φ (Certificate.constraintSum sigmas gs) := by
-  unfold Certificate.constraintSum
-  induction sigmas generalizing gs with
+    0 ≤ CMvPolynomial.aeval φ (Certificate.constraintProduct gs idxs) := by
+  unfold Certificate.constraintProduct
+  induction idxs with
   | nil =>
-    rw [List.zip_nil_left, List.foldr_nil, CMvPolynomial.aeval_zero]
-  | cons sd sds ih =>
-    cases gs with
-    | nil =>
-      rw [List.zip_nil_right, List.foldr_nil, CMvPolynomial.aeval_zero]
-    | cons g gs' =>
-      rw [List.zip_cons_cons, List.foldr_cons, CMvPolynomial.aeval_add,
-          CMvPolynomial.aeval_mul]
-      refine add_nonneg ?tail ?head
-      case tail =>
-        apply ih
-        intro g' hg'
-        exact hgs g' (List.mem_cons_of_mem g hg')
-      case head =>
-        exact mul_nonneg
-          (sd.toPoly_aeval_nonneg φ)
-          (hgs g List.mem_cons_self)
+    rw [List.foldr_nil, CMvPolynomial.aeval_one]
+    exact zero_le_one
+  | cons i is ih =>
+    rw [List.foldr_cons, CMvPolynomial.aeval_mul]
+    refine mul_nonneg ih ?_
+    -- `gs.getD i 1` is either some `g ∈ gs` (non-negative) or `1`.
+    by_cases hi : i < gs.length
+    · have hmem : gs.getD i 1 ∈ gs := by
+        rw [List.getD_eq_getElem _ _ hi]
+        exact List.getElem_mem hi
+      exact hgs _ hmem
+    · have : gs.getD i 1 = 1 := List.getD_eq_default _ _ (Nat.not_lt.mp hi)
+      rw [this, CMvPolynomial.aeval_one]
+      exact zero_le_one
+
+/-- The monoid sum `Σ_S σ_S.toPoly · ∏_{i ∈ S} gs[i]` evaluates
+non-negatively when every `gᵢ` does. -/
+theorem Certificate.monoidSum_aeval_nonneg
+    (sigmas : List (List Nat × SOSDecomp n))
+    (gs : List (CMvPolynomial n ℚ)) (φ : Fin n → ℝ)
+    (hgs : ∀ g ∈ gs, 0 ≤ CMvPolynomial.aeval φ g) :
+    0 ≤ CMvPolynomial.aeval φ (Certificate.monoidSum sigmas gs) := by
+  unfold Certificate.monoidSum
+  induction sigmas with
+  | nil =>
+    rw [List.foldr_nil, CMvPolynomial.aeval_zero]
+  | cons pair rest ih =>
+    rw [List.foldr_cons, CMvPolynomial.aeval_add, CMvPolynomial.aeval_mul]
+    refine add_nonneg ih ?_
+    exact mul_nonneg
+      (pair.2.toPoly_aeval_nonneg φ)
+      (Certificate.constraintProduct_aeval_nonneg gs pair.1 φ hgs)
 
 /-- The equality cofactor sum `Σⱼ qⱼ · pⱼ` evaluates to zero whenever
 each `pⱼ` evaluates to zero. The cofactors `qⱼ` are unrestricted. -/
@@ -215,9 +229,9 @@ theorem Certificate.equalitySum_aeval_zero
         exact hps p' (List.mem_cons_of_mem p hp')
       rw [h_p_zero, mul_zero, add_zero, h_tail]
 
-/-- The certificate's full expansion `σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ`
-evaluates non-negatively when every `gᵢ` is non-negative and every
-`pⱼ` is zero. -/
+/-- The certificate's full expansion
+`Σ_S σ_S · ∏_{i ∈ S} gᵢ + Σⱼ qⱼ · pⱼ` evaluates non-negatively when
+every `gᵢ` is non-negative and every `pⱼ` is zero. -/
 theorem Certificate.toPoly_aeval_nonneg
     (c : Certificate n) (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ)) (φ : Fin n → ℝ)
@@ -225,11 +239,9 @@ theorem Certificate.toPoly_aeval_nonneg
     (hps : ∀ p ∈ ps, CMvPolynomial.aeval φ p = 0) :
     0 ≤ CMvPolynomial.aeval φ (c.toPoly gs ps) := by
   unfold Certificate.toPoly
-  rw [CMvPolynomial.aeval_add, CMvPolynomial.aeval_add,
+  rw [CMvPolynomial.aeval_add,
       Certificate.equalitySum_aeval_zero c.eqCofs ps φ hps, add_zero]
-  exact add_nonneg
-    (c.sigma0.toPoly_aeval_nonneg φ)
-    (Certificate.constraintSum_aeval_nonneg c.sigmas gs φ hgs)
+  exact Certificate.monoidSum_aeval_nonneg c.sigmas gs φ hgs
 
 /-- **Soundness, closed positivity, with equality hypotheses.** -/
 theorem sos_sound
@@ -241,7 +253,7 @@ theorem sos_sound
       (∀ q ∈ ps, CMvPolynomial.aeval φ q = 0) →
       0 ≤ CMvPolynomial.aeval φ p := by
   intro φ hgs hps
-  obtain ⟨_hlenG, _hlenP, hid⟩ :=
+  obtain ⟨_hbounds, _hlenP, hid⟩ :=
     (Certificate.checks_iff cert (.closed p) gs ps).mp h
   have htgt : (Goal.closed (n := n) p).target = p := rfl
   rw [htgt] at hid
@@ -259,7 +271,7 @@ theorem sos_strict_sound
       (∀ q ∈ ps, CMvPolynomial.aeval φ q = 0) →
       0 < CMvPolynomial.aeval φ p := by
   intro φ hgs hps
-  obtain ⟨_hlenG, _hlenP, hid⟩ :=
+  obtain ⟨_hbounds, _hlenP, hid⟩ :=
     (Certificate.checks_iff cert (.strict p ε hε) gs ps).mp h
   have htgt : (Goal.strict (n := n) p ε hε).target = p - CMvPolynomial.C ε := rfl
   rw [htgt] at hid
@@ -279,7 +291,7 @@ theorem sos_infeasible_sound
       (∀ q ∈ ps, CMvPolynomial.aeval φ q = 0) →
       False := by
   intro φ hgs hps
-  obtain ⟨_hlenG, _hlenP, hid⟩ :=
+  obtain ⟨_hbounds, _hlenP, hid⟩ :=
     (Certificate.checks_iff cert (.infeasible (n := n)) gs ps).mp h
   have htgt : (Goal.infeasible (n := n)).target = -1 := rfl
   rw [htgt] at hid

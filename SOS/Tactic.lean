@@ -40,9 +40,24 @@ open Lean Elab Tactic Meta
   the same `extraDeg` if the pruned variant doesn't certify, so the
   choice is a speed/sparsity knob, not a completeness one. -/
 structure Config where
+  /-- Iterative-deepening cap (see field docs above). -/
   maxDepth : Nat := 1
-  maxRoundingDenom : Nat := 1048576
+  /-- Upper cap on rounding-denominator candidates. Raised to `2^24`
+  to give the preordering encoding (issue #38) room when product blocks
+  push the rounding pressure beyond `2^20`. -/
+  maxRoundingDenom : Nat := 16777216
+  /-- σ₀-basis pruning strategy. See field docs above. -/
   basisStrategy : SOS.Search.BasisStrategy := .newton
+  /-- Internal performance knob for the constraint-product monoid (Schmüdgen
+  preordering): caps the cardinality of subsets enumerated in the σ-block
+  monoid. `1` is pure Putinar (one σᵢ per constraint, no products); higher
+  values let the search use products of constraint polynomials. The search
+  always tries Putinar (cardinality 1) first; if that fails it falls back
+  to `maxSubsetCardinality`. The default cap is high enough to cover all
+  Harrison preordering targets; lower it for batch/performance-critical
+  pipelines where interval-Schur-style targets with many constraints can
+  produce up to `2^k − 1` product blocks. -/
+  maxSubsetCardinality : Nat := 6
   deriving Inhabited
 
 /-- Elaborator for `(config := …)` clauses on `sos`/`sos?`. -/
@@ -417,23 +432,23 @@ syntax (name := sosWitnessTactic)
 quoted via `SOS.Poly.decompile` so each square round-trips through
 `ToExpr (SOS.Poly n)`. -/
 private structure DecompiledCertificate (n : Nat) where
-  sigma0 : List (SOS.Poly n)
-  sigmas : List (List (SOS.Poly n))
+  /-- Subset-indexed σ blocks: each entry pairs the constraint-index
+  subset with the SOS decomposition's squares. The empty subset is σ₀;
+  singletons are Putinar σᵢ; higher cardinalities are Schmüdgen products. -/
+  sigmas : List (List Nat × List (SOS.Poly n))
   eqCofs : List (SOS.Poly n) := []
 
 private def decompileCertificate {n : Nat}
     (cert : SOS.Certificate n) : DecompiledCertificate n :=
-  { sigma0 := cert.sigma0.squares.map SOS.Poly.decompile,
-    sigmas := cert.sigmas.map (·.squares.map SOS.Poly.decompile),
+  { sigmas := cert.sigmas.map (fun pair => (pair.1, pair.2.squares.map SOS.Poly.decompile)),
     eqCofs := cert.eqCofs.map SOS.Poly.decompile }
 
 private def certExprOfDecompiled (n : Nat)
     (cert : DecompiledCertificate n) : MetaM Expr := do
-  let sigma0E := Lean.toExpr cert.sigma0
   let sigmasE := Lean.toExpr cert.sigmas
   let eqCofsE := Lean.toExpr cert.eqCofs
   mkAppOptM ``SOS.Certificate.fromDecompiled
-    #[some (Lean.mkNatLit n), some sigma0E, some sigmasE, some eqCofsE]
+    #[some (Lean.mkNatLit n), some sigmasE, some eqCofsE]
 
 /-- Cast each constraint's `Raw` to the typed `Poly n`. Returns
 `(inequality polys, equality polys)`, partitioned by `ConstraintKind`. -/
@@ -518,9 +533,17 @@ where
 private def formatSquares {n : Nat} (sqs : List (SOS.Poly n)) : String :=
   "[" ++ ", ".intercalate (sqs.map (fun p => formatPoly p)) ++ "]"
 
+/-- Render a subset of constraint indices as a Lean source literal
+`[i₀, i₁, …]`. -/
+private def formatIdxs (idxs : List Nat) : String :=
+  "[" ++ ", ".intercalate (idxs.map toString) ++ "]"
+
+/-- Render the subset-indexed σ list as a Lean source literal
+`[(idxs₀, { squares := … }), …]`. -/
 private def formatSigmasList {n : Nat}
-    (ds : List (List (SOS.Poly n))) : String :=
-  let entries := ds.map fun sqs => s!"\{ squares := {formatSquares sqs} }"
+    (ds : List (List Nat × List (SOS.Poly n))) : String :=
+  let entries := ds.map fun pair =>
+    s!"({formatIdxs pair.1}, \{ squares := {formatSquares pair.2} })"
   "[" ++ ", ".intercalate entries ++ "]"
 
 /-- Render a list of polynomial cofactors as a Lean source literal
@@ -536,8 +559,7 @@ private def formatDecompiledCertificate {n : Nat}
   let eqSuffix :=
     if cert.eqCofs.isEmpty then ""
     else s!", eqCofs := {formatEqCofsList cert.eqCofs}"
-  s!"\{ sigma0 := \{ squares := {formatSquares cert.sigma0} }, \
-     sigmas := {formatSigmasList cert.sigmas}{eqSuffix} }"
+  s!"\{ sigmas := {formatSigmasList cert.sigmas}{eqSuffix} }"
 
 /-- Format an ε rational as a Lean source literal (`(num : ℚ)` or
 `((num : ℚ) / den)`), suitable for the `with ε := …` clause. -/
@@ -583,26 +605,30 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
   let maxDenom := cfg.maxRoundingDenom
   let maxDepth := cfg.maxDepth
   let strategy := cfg.basisStrategy
+  let maxCard := cfg.maxSubsetCardinality
   match parsed.shape with
   | .closed =>
     let p ← parsedConclusionData s!"{tag} (closed)" parsed n
     let goal : SOS.Goal n := .closed p.tree.toCMv
     match (← (SOS.Search.runSearch goal gsCMv psCMv
         (maxRoundingDenom := maxDenom) (maxDepth := maxDepth)
-        (basisStrategy := strategy) : IO _)) with
+        (basisStrategy := strategy)
+        (maxSubsetCardinality := maxCard) : IO _)) with
     | none => throwError "{tag}: search failed to find a certificate"
     | some cert => withFoundCert cert .closed none
   | .infeasible =>
     match (← (SOS.Search.runSearch .infeasible gsCMv psCMv
         (maxRoundingDenom := maxDenom) (maxDepth := maxDepth)
-        (basisStrategy := strategy) : IO _)) with
+        (basisStrategy := strategy)
+        (maxSubsetCardinality := maxCard) : IO _)) with
     | none => throwError "{tag}: search failed to find an infeasibility certificate"
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
     match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv
         (maxRoundingDenom := maxDenom) (maxDepth := maxDepth)
-        (basisStrategy := strategy) : IO _)) with
+        (basisStrategy := strategy)
+        (maxSubsetCardinality := maxCard) : IO _)) with
     | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε

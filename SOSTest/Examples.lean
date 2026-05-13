@@ -184,28 +184,28 @@ elaboration time, with no CSDP call — useful for committing a
 certificate that you don't want re-derived on every build. -/
 
 /-- info: Try this:
-  [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
+  [apply] sos_witness { sigmas := [([], { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] })] }
 -/
 #guard_msgs in
 example (x : ℝ) : 0 ≤ x^2 + 1 := by sos?
 
 -- And the suggested replacement compiles:
 example (x : ℝ) : 0 ≤ x^2 + 1 := by
-  sos_witness { sigma0 := { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] }, sigmas := [] }
+  sos_witness { sigmas := [([], { squares := [CMvPolynomial.C (1 : ℚ), CMvPolynomial.X 0] })] }
 
 -- For strict positivity, the `Try this:` suggestion includes `with ε := …`.
 /-- info: Try this:
-  [apply] sos_witness { sigma0 := { squares := [CMvPolynomial.X 0] }, sigmas := [] } with ε := (1 : ℚ)
+  [apply] sos_witness { sigmas := [([], { squares := [CMvPolynomial.X 0] })] } with ε := (1 : ℚ)
 -/
 #guard_msgs in
 example (x : ℝ) : 0 < x^2 + 1 := by sos?
 
 example (x : ℝ) : 0 < x^2 + 1 := by
-  sos_witness { sigma0 := { squares := [CMvPolynomial.X 0] }, sigmas := [] } with ε := (1 : ℚ)
+  sos_witness { sigmas := [([], { squares := [CMvPolynomial.X 0] })] } with ε := (1 : ℚ)
 
 -- For equality goals the suggestion includes `eqCofs := …`.
 /-- info: Try this:
-  [apply] sos_witness { sigma0 := { squares := [] }, sigmas := [], eqCofs := [CMvPolynomial.C (1 : ℚ)] }
+  [apply] sos_witness { sigmas := [([], { squares := [] })], eqCofs := [CMvPolynomial.C (1 : ℚ)] }
 -/
 #guard_msgs in
 example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos?
@@ -220,22 +220,20 @@ constraint isn't load-bearing.) -/
 -- Constrained — trivial witness, exercising the constraint structural check.
 example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 := by
   sos_witness
-    { sigma0 := { squares := [CMvPolynomial.X 0] },
-      sigmas := [{ squares := [] }] }
+    { sigmas := [([], { squares := [CMvPolynomial.X 0] })] }
 
 -- Infeasibility — `-1 = x² + 1·(-x² - 1)` proves the constraint set
 -- `{x² + 1 ≤ 0}` is infeasible.
 example (x : ℝ) : ¬ (x^2 + 1 ≤ 0) := by
   sos_witness
-    { sigma0 := { squares := [CMvPolynomial.X 0] },
-      sigmas := [{ squares := [CMvPolynomial.C (1 : ℚ)] }] }
+    { sigmas := [([], { squares := [CMvPolynomial.X 0] }),
+                 ([0], { squares := [CMvPolynomial.C (1 : ℚ)] })] }
 
 -- Combined inequality + equality: from `0 ≤ x − 1` and `x = 0` derive
 -- `False`. Certificate: `−1 = 0 + 1·(x − 1) + (−1)·x`.
 example (x : ℝ) (_hx : 0 ≤ x - 1) (_hxz : x = 0) : False := by
   sos_witness
-    { sigma0 := { squares := [] },
-      sigmas := [{ squares := [CMvPolynomial.C (1 : ℚ)] }],
+    { sigmas := [([0], { squares := [CMvPolynomial.C (1 : ℚ)] })],
       eqCofs := [-CMvPolynomial.C (1 : ℚ)] }
 
 /-! ## §9. Graceful failure & out-of-scope guards -/
