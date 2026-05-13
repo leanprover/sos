@@ -146,3 +146,80 @@ example : ∀ m n : ℤ, 0 < n → m % n < n := by sos
 -- product.
 -- example : ∀ m n p : ℕ, p ≠ 0 → m ≤ n → m / p ≤ n / p := by sos
 
+/-! ### Refute + equality cofactor — CSDP numerical degeneracy (issue #54)
+
+The three goals below all admit short Schmüdgen-style refutation
+certificates with constant cofactors (computed by hand for each):
+
+  * `(a*b)/b = a` (`b ≠ 0`): split by `le_antisymm` into two ≤-goals,
+    each closes by refute against the witness `a·b = b·q + r` plus a
+    single Schmüdgen product `b·(q − a − 1) ≥ 0` (one direction) or
+    `b·(a − q − 1) ≥ 0` (the other). Cardinality 2.
+  * `n/2 + (n+1)/2 = n`: pure Putinar from `2·(q₁+q₂ - n - 1) + r₁
+    + r₂ - p_1 - p_2 = -1`.
+  * `a/c + b/c ≤ (a+b)/c` (`c ≠ 0`): refute closes via Schmüdgen
+    `c·(q_a + q_b - q_{ab} - 1) ≥ 0` against `a + b = c·q_{ab} +
+    r_{ab}`, sum of the per-summand equalities.
+
+All three certificates verify exactly under `Certificate.checks`
+(`decide +kernel` on the polynomial identity). The blocker is at the
+CSDP solve step, not at the certificate verifier or the cert search
+space: when the goal goes through the refute / infeasibility arm
+(target = −1, useTraceCost = false), the LP-encoded equality cofactor
+block (`λ = x⁺ − x⁻` with `x⁺, x⁻ ≥ 0` and zero cost) leaves CSDP's
+central path on the boundary of primal feasibility. CSDP returns
+non-success codes (1/5/7) at the natural relaxation depth and only
+much later — at extraDeg ≥ 1, cardinality ≥ 6 — produces a
+numerically feasible solution, by which point the SDP has dozens of
+extra σ blocks whose Gram matrices don't round to the natural cert.
+
+The closed-positivity path uses `useTraceCost = true`, which gives
+CSDP a well-defined central path; the LP cofactor block then behaves
+fine. So the existing `n = 2·(n/2) + n%2` showcase test (which is
+also an equality goal but doesn't need refute on either ≤-half)
+closes cleanly, and the obstruction is specific to refute-arm goals
+whose certificate genuinely needs the integer-discreteness step.
+
+Harrison's HOL Light `sos.ml` avoids this problem by eliminating
+ideal cofactor variables before the SDP solve:
+
+  * `SOS_RULE` rewrites `NUM` goals to `INT` (`NUM_TO_INT_CONV`), then
+    `INT_SOS` refutes the negation and calls `REAL_SOS`.
+  * `REAL_SOS` runs `GEN_REAL_ARITH REAL_NONLINEAR_SUBST_PROVER`,
+    which repeatedly substitutes any equation with a substitutable
+    real variable into the rest of the system before the SDP solve
+    (`Examples/sos.ml:1229-1252`).
+  * The underlying Positivstellensatz at `Examples/sos.ml:1054` also
+    runs `eliminate_all_equations` on the coefficient equations
+    *symbolically* before building the CSDP problem; `mk_matrix`
+    skips negative-tag blocks (the ideal cofactors) at
+    `Examples/sos.ml:1058-1062`, and the CSDP objective is only ever
+    populated on the surviving positive SDP block diagonals
+    (`Examples/sos.ml:1063-1069`).
+
+So Harrison's effective encoding is `a = b·q + r, 0 ≤ r, r ≤ b − 1`,
+but the equality is used to substitute one variable away (typically
+`r := a − b·q` for div/mod sites), leaving a pure quadratic-module
+problem with no LP cofactor null direction. For our case B, after the
+substitution `r := a·b − b·q`, the Schmüdgen-2 cert
+`-1 = 2·(a·b − b·q) + (b − (a·b − b·q) − 1) + b·(q − a − 1)` lands
+directly without ever instantiating an LP block.
+
+The fix is to add an equality-elimination pre-pass to the search:
+identify equalities of the form `var = poly_without_var` in `ps`,
+substitute `var` out of every other constraint and the target, drop
+the equality from `ps`. This mirrors `REAL_NONLINEAR_SUBST_PROVER`.
+Surgical at the search level: drops `ps`-driven LP blocks, leaves the
+certificate-verifier API unchanged because the eliminated variable
+becomes part of the polynomial expression in the cert. A smaller
+short-term mitigation (`-ε` cost on the LP split block) bounds the
+null direction numerically; testing showed CSDP still returns return
+codes 1/5 on these specific problems, so a numerical regulariser is
+not by itself sufficient — the symbolic elimination is the right
+solution.
+
+-- example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b = a := by sos
+-- example : ∀ n : ℕ, n / 2 + (n + 1) / 2 = n := by sos
+-- example : ∀ a b c : ℕ, c ≠ 0 → a / c + b / c ≤ (a + b) / c := by sos
+-/
+
