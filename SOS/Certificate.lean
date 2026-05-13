@@ -157,4 +157,17 @@ def Certificate.fromPutinar {n : Nat}
     ([], sigma0) :: sigmas.zipIdx.map (fun pair => ([pair.2], pair.1))
   { sigmas := indexed, eqCofs }
 
+/-! ### Strict-product Positivstellensatz support
+
+For Harrison's `REAL_NONLINEAR_PROVER` boundary-tight strict-positivity
+path: the strict-positive witness `(∏ strictGs)^i` is built structurally
+from strict hypotheses, while a closed certificate handles the residual
+`−(∏ strictGs)^i = σ₀ + Σ_T σ_T · ∏ gs[T] + Σⱼ qⱼ · pⱼ` against the
+*augmented* constraint list `gs ++ [−p]`. -/
+
+/-- Left-to-right product of a polynomial list; `1` on the empty list. -/
+def strictProductPoly {n : Nat} : List (CMvPolynomial n ℚ) → CMvPolynomial n ℚ
+  | []      => 1
+  | g :: rest => g * strictProductPoly rest
+
 end SOS

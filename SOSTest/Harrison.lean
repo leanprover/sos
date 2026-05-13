@@ -150,14 +150,14 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
     0 ≤ x*y - (x + y - 1) := by sos
 
--- FIXME sos.ml:1657 — strict version of the above. The closed
--- inequality is tight at `x = y = 1` (boundary of `x ≥ 1, y ≥ 1`),
--- so the strict inequality has no uniform ε slack; even with a
--- preordering encoding `runStrict` would have to keep ε bounded
--- away from the constraint boundary, which the LP-slack solve
--- doesn't enforce.
--- example (x y : ℝ) (_hx : 0 < x - 1) (_hy : 0 < y - 1) :
---     0 < x*y - (x + y - 1) := by sos
+-- sos.ml:1657 — strict version of the above. Boundary-tight at
+-- `x = y = 1`, so `runStrict`'s LP-slack pass finds no uniform ε.
+-- Closes via the strict-product Positivstellensatz fallback (issue
+-- #46), which finds the certificate `(x−1)(y−1) > 0` structurally
+-- from the strict hypotheses and an SOS identity over the augmented
+-- constraint list `[x−1, y−1, −(xy − (x+y−1))]`.
+example (x y : ℝ) (_hx : 0 < x - 1) (_hy : 0 < y - 1) :
+    0 < x*y - (x + y - 1) := by sos
 
 -- sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`. Closes
 -- via the Schmüdgen-style preordering enumeration (issue #38).

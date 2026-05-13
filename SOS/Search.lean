@@ -1377,6 +1377,80 @@ def runStrict (p : CMvPolynomial n ℚ)
         | none => pure ()
   return none
 
+/-! ### Strict positivity via strict-product Positivstellensatz
+
+Harrison's `REAL_NONLINEAR_PROVER` (sos.ml:1196–1236) handles
+boundary-tight strict goals — those where the LHS attains its strict
+bound on the boundary of the hypothesis region, so no uniform `ε > 0`
+admits a closed cert — by encoding strict-positivity *structurally*:
+build `pol = ∏ strictGs` (product of strict-hypothesis polynomials),
+search for a closed cert of `−pol^i` against the augmented inequality
+list `gs ++ [−p]`, then derive `pol^i > 0` from repeated `mul_pos`
+applied to the strict hypotheses. Under the contrapositive `p ≤ 0`,
+the augmented list is all ≥ 0, the cert forces `pol^i ≤ 0`, and we
+contradict the structural strict-positivity. See
+`sos_strict_product_sound` in `SOS.Verifier`.
+
+The motivating example is `sos.ml:1657`:
+`x > 1 ∧ y > 1 ⇒ x · y > x + y − 1`, tight at `(1,1)`. `runStrict`'s
+LP-slack path correctly returns `none` here; this path finds the
+cert with `i = 1` and `pol = (x−1)(y−1)`. -/
+
+/-- Strict-product certificate output bundle. The `strictGs` list is
+the *polynomial values* of the strict-hypothesis inequalities (already
+in canonical `0 < g` form), and `exponent` is the `i` in `pol^i`. -/
+structure StrictProductResult (n : Nat) where
+  cert      : Certificate n
+  strictGs  : List (CMvPolynomial n ℚ)
+  exponent  : Nat
+
+/-- Strict-positivity search via strict-product Positivstellensatz.
+Iterates the exponent `i` from `1` up to a budget derived from
+`p.totalDegree`, `maxDepth`, and `deg(pol)` (mirroring Harrison's
+`tryall` k-bound but expressed in our `extraDeg` units). The inner
+search is the standard closed-goal `runFeasibilitySearch` against the
+augmented inequality list `gs ++ [−p]`, so this path benefits from all
+the rounding / basis-pruning / preordering work already in
+`runFeasibilitySearch`. Returns `none` if no exponent in the budget
+produces a verifiable closed cert. -/
+def runStrictProduct (p : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ))
+    (strictIdxs : List Nat) (ps : List (CMvPolynomial n ℚ) := [])
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
+    (basisStrategy : BasisStrategy := .newton)
+    (maxSubsetCardinality : Nat := 1) :
+    IO (Option (StrictProductResult n)) := do
+  -- No strict hypotheses ⇒ no structural strict-positivity witness; bail.
+  if strictIdxs.isEmpty then return none
+  let strictGs : List (CMvPolynomial n ℚ) :=
+    strictIdxs.map (fun i => gs.getD i 0)
+  let pol := strictProductPoly strictGs
+  let polDeg := pol.totalDegree
+  -- Degenerate constant-product (shouldn't happen for honest strict
+  -- inequalities, but defend against it cleanly).
+  if polDeg = 0 then return none
+  let augGs := gs ++ [-p]
+  -- Exponent budget. Harrison's `tryall` ranges `i ∈ 0..k` where
+  -- `k = d / deg(pol)` and `d` is the absolute degree budget. Our
+  -- `maxDepth` is a *relaxation increment* in `extraDeg` (each unit
+  -- adds 2 to the polynomial degree the σ blocks can absorb). The
+  -- closed cert for `−pol^i` has target degree `i · deg(pol)`, and
+  -- the inner search supplies the relaxation. Skip `i = 0` (constant
+  -- target `−1`): that's a pure refutation of the augmented system
+  -- with no strict-product contribution, and runStrict's LP-slack
+  -- pass has already covered the non-boundary refutation cases.
+  let budget := p.totalDegree + 2 * maxDepth + 2
+  let iMax := budget / polDeg
+  for i in [1:iMax + 1] do
+    let target := -(pol ^ i)
+    let goal : Goal n := .closed target
+    match (← runFeasibilitySearch target augGs ps goal maxRoundingDenom
+        (maxDepth := maxDepth) (basisStrategy := basisStrategy)
+        (maxSubsetCardinality := maxSubsetCardinality)) with
+    | some cert => return some { cert, strictGs, exponent := i }
+    | none => pure ()
+  return none
+
 /-- Closed/infeasibility search dispatcher. Owns the `Goal → target`
 translation (`p` for `.closed`, `-1` for `.infeasible`). Strict
 positivity has its own entry point: `runStrict`; the `.strict` arm

@@ -102,6 +102,15 @@ theorem aeval_nonneg_of_orig
     0 ≤ CMvPolynomial.aeval x p.toCMv := by
   rw [← SOS.Poly.evalReal_eq_aeval, h_eq]; exact h
 
+/-- Bring a hypothesis `0 < origExpr` into `0 < aeval x p.toCMv` form,
+mirroring `aeval_nonneg_of_orig`. Used by the strict-product Positivstellensatz
+path which needs *strict* positivity of each strict hypothesis. -/
+theorem aeval_pos_of_orig
+    {x : Fin n → ℝ} {p : SOS.Poly n} {e : ℝ}
+    (h_eq : SOS.Poly.evalReal x p = e) (h : 0 < e) :
+    0 < CMvPolynomial.aeval x p.toCMv := by
+  rw [← SOS.Poly.evalReal_eq_aeval, h_eq]; exact h
+
 /-- Bring a hypothesis `origExpr ≤ 0` into `0 ≤ aeval x p.toCMv` form, given
 the bridge equality `evalReal x p = -origExpr`. The reifier emits
 `p = -reify(origExpr)` for `≤ 0` constraints, so this matches. -/
@@ -280,6 +289,70 @@ theorem sos_strict_sound
   rw [CMvPolynomial.aeval_sub, CMvPolynomial.aeval_C] at h_diff
   have hε_real : (0 : ℝ) < (algebraMap ℚ ℝ) ε := by
     show (0 : ℝ) < (ε : ℝ); exact_mod_cast hε
+  linarith
+
+/-- The strict-product witness polynomial `∏ strictGs` evaluates
+strictly positively when every `g ∈ strictGs` does. The base case
+`strictGs = []` gives `aeval φ 1 = 1 > 0`; the inductive step combines
+`mul_pos` with the head/tail of the product. -/
+theorem strictProductPoly_aeval_pos
+    (strictGs : List (CMvPolynomial n ℚ)) (φ : Fin n → ℝ)
+    (h : ∀ g ∈ strictGs, 0 < CMvPolynomial.aeval φ g) :
+    0 < CMvPolynomial.aeval φ (strictProductPoly strictGs) := by
+  induction strictGs with
+  | nil =>
+    unfold strictProductPoly
+    rw [CMvPolynomial.aeval_one]
+    exact zero_lt_one
+  | cons g rest ih =>
+    unfold strictProductPoly
+    rw [CMvPolynomial.aeval_mul]
+    refine mul_pos (h g List.mem_cons_self) (ih ?_)
+    intro g' hg'
+    exact h g' (List.mem_cons_of_mem _ hg')
+
+/-- **Soundness, strict positivity via strict-product Positivstellensatz.**
+
+To prove `0 < p` against ≥-constraints `gs`, =-constraints `ps`, and
+strict-positivity facts `0 < g` for each `g ∈ strictGs`, we ask for a
+closed certificate of the polynomial `−(∏ strictGs)^i` against the
+*augmented* inequality list `gs ++ [−p]`. Under the contrapositive
+`p ≤ 0`, every entry of the augmented list is ≥ 0, so the cone term
+`σ_cert ≥ 0` and the identity `−pol^i = σ_cert` force `pol^i ≤ 0` — but
+`pol = ∏ strictGs > 0` from `strictProductPoly_aeval_pos`, giving
+`pol^i > 0` and a contradiction. This unlocks boundary-tight strict
+goals where no uniform `ε`-slack exists. -/
+theorem sos_strict_product_sound
+    (p : CMvPolynomial n ℚ) (strictGs : List (CMvPolynomial n ℚ))
+    (exponent : Nat) (gs : List (CMvPolynomial n ℚ))
+    (ps : List (CMvPolynomial n ℚ)) (cert : Certificate n)
+    (h : cert.checks
+            (.closed (-(strictProductPoly strictGs) ^ exponent))
+            (gs ++ [-p]) ps = true) :
+    ∀ φ : Fin n → ℝ,
+      (∀ g ∈ gs, 0 ≤ CMvPolynomial.aeval φ g) →
+      (∀ q ∈ ps, CMvPolynomial.aeval φ q = 0) →
+      (∀ g ∈ strictGs, 0 < CMvPolynomial.aeval φ g) →
+      0 < CMvPolynomial.aeval φ p := by
+  intro φ hgs hps hstrict
+  by_contra h_neg
+  have h_neg : CMvPolynomial.aeval φ p ≤ 0 := not_lt.mp h_neg
+  have h_negp_nonneg : 0 ≤ CMvPolynomial.aeval φ (-p) := by
+    rw [CMvPolynomial.aeval_neg]; linarith
+  have hgs_aug : ∀ g ∈ gs ++ [-p], 0 ≤ CMvPolynomial.aeval φ g := by
+    intro g hg
+    rcases List.mem_append.mp hg with hin | hin
+    · exact hgs g hin
+    · have : g = -p := List.mem_singleton.mp hin
+      rw [this]; exact h_negp_nonneg
+  have h_res :=
+    sos_sound _ _ _ _ h φ hgs_aug hps
+  rw [CMvPolynomial.aeval_neg, CMvPolynomial.aeval_pow] at h_res
+  have h_pol_pos : 0 < CMvPolynomial.aeval φ (strictProductPoly strictGs) :=
+    strictProductPoly_aeval_pos strictGs φ hstrict
+  have h_pow_pos :
+      0 < (CMvPolynomial.aeval φ (strictProductPoly strictGs)) ^ exponent :=
+    pow_pos h_pol_pos exponent
   linarith
 
 /-- **Soundness, infeasibility refutation, with equality hypotheses.** -/

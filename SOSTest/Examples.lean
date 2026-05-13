@@ -96,6 +96,14 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 -- elaborator via `le_of_lt`.
 example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
 
+-- Boundary-tight strict goal (issue #46). `runStrict`'s LP-slack pass
+-- correctly fails — `x² → 0` as `x → 0⁺`, so no uniform `ε > 0`
+-- admits `x² ≥ ε` for all `x > 0`. Closed via the strict-product
+-- Positivstellensatz fallback: `pol = x`, `i = 2` gives
+-- `−x² = 1 · (−x²)` against augmented `[x, −x²]`, with `x² > 0`
+-- recovered structurally from `0 < x` via `mul_pos`.
+example (x : ℝ) (_h : 0 < x) : 0 < x^2 := by sos
+
 -- Nonpos hypothesis (`h : x ≤ 0`), driving the `.neg`-wrapping in
 -- `recogniseConstraint` and the `aeval_nonneg_of_orig_neg` bridge in
 -- `SOS/Verifier.lean`.
