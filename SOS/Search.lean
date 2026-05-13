@@ -2,7 +2,7 @@
 Copyright (c) 2026 Kim Morrison. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 
-SDP encoding (CompPoly polynomials → `LeanCsdp.Problem`), rational
+SDP encoding (CompPoly polynomials → `CSDP.Problem`), rational
 rounding of the float Gram-matrix solution, and the top-level
 `runSearch` driver.
 
@@ -40,7 +40,7 @@ import SOS.LDL
 import SOS.RatLinAlg
 import SOS.RatSimplex
 import SOS.Symmetry
-import LeanCsdp
+import CSDP
 
 namespace SOS.Search
 
@@ -478,7 +478,7 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := [])
     (extraDeg : Nat := 0) (strategy : BasisStrategy := .dense)
     (maxSubsetCardinality : Nat := 1) :
-    LeanCsdp.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
+    CSDP.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
       Array (CMvMonomial n) × Option Nat :=
   let σBlocks := buildBlocks target gs ps extraDeg strategy maxSubsetCardinality
   let eqSpecs := buildEqCofactorSpecs target gs ps extraDeg
@@ -561,8 +561,8 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
           cachedEq := cachedEq.push { eqIdx, basisIdx := b, support }
       return (cached, cachedEq, monos, monoIndex)
   let b : Array Float := monos.map fun m => ratToFloat (target.coeff m)
-  let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
-    let mut acc : Array LeanCsdp.ConstraintTriple := #[]
+  let aTriples : Array CSDP.ConstraintTriple := Id.run do
+    let mut acc : Array CSDP.ConstraintTriple := #[]
     for cp in cached do
       for (m, c) in cp.support do
         let monoIdx := monoIndex[m]!
@@ -603,10 +603,10 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
   -- Cost matrix: trace cost on σ-blocks only. The cofactor LP blocks
   -- must have zero cost — `tr` would drive `x⁺` and `x⁻` to infinity
   -- together. CSDP maximises `tr(C·X)`. See `SdpMode`.
-  let cTriples : Array LeanCsdp.Triple :=
+  let cTriples : Array CSDP.Triple :=
     match mode, lambdaBlockIdx? with
     | .feasibility true, _ => Id.run do
-      let mut acc : Array LeanCsdp.Triple := #[]
+      let mut acc : Array CSDP.Triple := #[]
       for blockIdx in [0:σBlocks.size] do
         let block := σBlocks[blockIdx]!
         for j in [0:block.size] do
@@ -621,7 +621,7 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
       { block := UInt32.ofNat (lambdaBlockIdx + 1), row := 1, col := 1,
         value := 1.0 }]
     | .lpSlack, none => #[]  -- unreachable; lambdaBlockIdx? is `some` in .lpSlack
-  let problem : LeanCsdp.Problem :=
+  let problem : CSDP.Problem :=
     { blockSizes := blockSizes
       b := b
       c := cTriples
@@ -686,7 +686,7 @@ def decodeSdpBlock (denom : ℚ) (n : Nat) (entries : FloatArray) :
   return some acc
 
 /-- Decode the full primal solution into per-block rational Gram matrices. -/
-def decodeSolution (sol : LeanCsdp.Solution) (denom : ℚ) :
+def decodeSolution (sol : CSDP.Solution) (denom : ℚ) :
     Option (Array (Array ℚ)) := Id.run do
   let mut acc : Array (Array ℚ) := #[]
   for b in sol.X do
@@ -733,21 +733,21 @@ groundwork rather than a complete fix for the conditioning-flagged
 FIXMEs (see issue #36's "Why this also matters" note). -/
 
 /-- Largest absolute value over a single component of the SDP data. -/
-private def maxA (problem : LeanCsdp.Problem) : Float := Id.run do
+private def maxA (problem : CSDP.Problem) : Float := Id.run do
   let mut m : Float := 0.0
   for t in problem.a do
     let v := t.value.abs
     if v > m then m := v
   return m
 
-private def maxB (problem : LeanCsdp.Problem) : Float := Id.run do
+private def maxB (problem : CSDP.Problem) : Float := Id.run do
   let mut m : Float := 0.0
   for x in problem.b do
     let v := x.abs
     if v > m then m := v
   return m
 
-private def maxC (problem : LeanCsdp.Problem) : Float := Id.run do
+private def maxC (problem : CSDP.Problem) : Float := Id.run do
   let mut m : Float := 0.0
   for t in problem.c do
     let v := t.value.abs
@@ -778,8 +778,8 @@ multiplied by `2^shiftAC`, `b` by `2^shiftB`. Returns the scaled
 problem and the resulting "X back-shift" — the exponent to multiply
 CSDP's returned `X` by to recover `X*` (see the module note above).
 Both shifts `0` ⇒ identity. -/
-private def conditionProblem (problem : LeanCsdp.Problem) :
-    LeanCsdp.Problem × Int :=
+private def conditionProblem (problem : CSDP.Problem) :
+    CSDP.Problem × Int :=
   let mA := maxA problem
   let mC := maxC problem
   let shiftAC := chooseShift (if mA > mC then mA else mC)
@@ -788,7 +788,7 @@ private def conditionProblem (problem : LeanCsdp.Problem) :
   else
     let sAC := pow2Float shiftAC
     let sB  := pow2Float shiftB
-    let problem' : LeanCsdp.Problem := { problem with
+    let problem' : CSDP.Problem := { problem with
         a := problem.a.map fun t => { t with value := t.value * sAC }
         b := problem.b.map (· * sB)
         c := problem.c.map fun t => { t with value := t.value * sAC } }
@@ -796,8 +796,8 @@ private def conditionProblem (problem : LeanCsdp.Problem) :
 
 /-- Multiply every Gram entry of `sol.X` by `2^xShift` to reverse the
 back-shift accumulated by `conditionProblem`. `xShift = 0` is a no-op. -/
-private def unscaleSolution (sol : LeanCsdp.Solution) (xShift : Int) :
-    LeanCsdp.Solution :=
+private def unscaleSolution (sol : CSDP.Solution) (xShift : Int) :
+    CSDP.Solution :=
   if xShift = 0 then sol
   else
     let s := pow2Float xShift
@@ -805,7 +805,7 @@ private def unscaleSolution (sol : LeanCsdp.Solution) (xShift : Int) :
       let mut out : FloatArray := FloatArray.empty
       for i in [0:a.size] do out := out.push (a.get! i * s)
       return out
-    let scaleBlock : LeanCsdp.Block → LeanCsdp.Block
+    let scaleBlock : CSDP.Block → CSDP.Block
       | .sdp n e  => .sdp n (scaleArr e)
       | .diag n e => .diag n (scaleArr e)
     { sol with X := sol.X.map scaleBlock }
@@ -840,7 +840,7 @@ step fails. -/
 def tryDenominator (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ))
     (blocks : Array (BlockSpec n)) (eqSpecs : Array (EqCofactorSpec n))
-    (sol : LeanCsdp.Solution) (denom : ℚ)
+    (sol : CSDP.Solution) (denom : ℚ)
     (goal : Goal n) : Option (Certificate n) := Id.run do
   let some Qs := decodeSolution sol denom | return none
   let hasEqs := !ps.isEmpty
@@ -1017,10 +1017,10 @@ coordinates; currently this uses CSDP's dual minimisation direction,
 which is enough to expose rational boundary points in the covered
 `Z₂×Z₂` case. -/
 private def buildReducedProblem (N : Nat) (mats : Array (Array ℚ)) :
-    LeanCsdp.Problem :=
+    CSDP.Problem :=
   let freeCount := mats.size - 1
-  let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
-    let mut acc : Array LeanCsdp.ConstraintTriple := #[]
+  let aTriples : Array CSDP.ConstraintTriple := Id.run do
+    let mut acc : Array CSDP.ConstraintTriple := #[]
     for k in [0:freeCount] do
       let M := mats[k + 1]!
       for v in [0:M.size] do
@@ -1034,8 +1034,8 @@ private def buildReducedProblem (N : Nat) (mats : Array (Array ℚ)) :
               col := UInt32.ofNat (j + 1)
               value := ratToFloat c }
     return acc
-  let cTriples : Array LeanCsdp.Triple := Id.run do
-    let mut acc : Array LeanCsdp.Triple := #[]
+  let cTriples : Array CSDP.Triple := Id.run do
+    let mut acc : Array CSDP.Triple := #[]
     let M0 := mats[0]!
     for v in [0:M0.size] do
       let c := M0[v]!
@@ -1119,7 +1119,7 @@ private def tryReducedPureSdp (target : CMvPolynomial n ℚ) (goal : Goal n)
     if cert.checks goal [] [] then return some cert else return none
   let mats := gramMats block.size param
   let problem := buildReducedProblem block.size mats
-  let sol := LeanCsdp.solve problem
+  let sol := CSDP.solve problem
   if sol.ret ∉ [0, 3] then
     return none
   let targetDenom : ℚ := (polyDenom target : ℚ)
@@ -1159,7 +1159,7 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
   -- and rounds cleanly; we recover `X*` by `unscaleSolution`. See the
   -- "Pre-CSDP matrix conditioning" section above.
   let (problem, xShift) := conditionProblem problem
-  let sol := LeanCsdp.solve problem
+  let sol := CSDP.solve problem
   if sol.ret ∉ [0, 3] then
     return none
   let sol := unscaleSolution sol xShift
@@ -1299,7 +1299,7 @@ structure StrictResult (n : Nat) where
 so its sole entry is the value we want. The `.diag` arm is defensive
 — the LP-slack builder uses a positive `1×1` block size, so CSDP
 returns `.sdp` here. -/
-private def readLambda (sol : LeanCsdp.Solution) (lambdaBlockIdx : Nat) :
+private def readLambda (sol : CSDP.Solution) (lambdaBlockIdx : Nat) :
     Float :=
   match sol.X[lambdaBlockIdx]? with
   | some (.sdp _ entries) => if entries.size > 0 then entries.get! 0 else 0.0
@@ -1342,7 +1342,7 @@ def runStrict (p : CMvPolynomial n ℚ)
     -- block of `sol.X`, so it scales with `X*` and `unscaleSolution`
     -- recovers it in the polynomial scale used to pick rational `ε`.
     let (problem, xShift) := conditionProblem problem
-    let sol := LeanCsdp.solve problem
+    let sol := CSDP.solve problem
     if sol.ret ∉ [0, 3] then continue
     let sol := unscaleSolution sol xShift
     let lambdaStar := readLambda sol lambdaBlockIdx

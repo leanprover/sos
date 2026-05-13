@@ -1,7 +1,7 @@
 name: CI
 
 # Linux-only. macOS and Windows runners would mirror the BLAS/LAPACK
-# install step from `kim-em/lean-csdp`'s workflow.
+# install step from `kim-em/csdp-ffi`'s workflow.
 
 on:
   push:
@@ -38,7 +38,7 @@ jobs:
 
       - name: Check CSDP native dependencies
         run: |
-          cd .lake/packages/leanCsdp
+          cd .lake/packages/CSDP
           lake script run checkNativeDeps
 
       - name: Build SOS

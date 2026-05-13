@@ -180,12 +180,12 @@ verification of the search/round/reconstruct/verify pipeline.
 
 ### Native dependency troubleshooting
 
-The tactic calls CSDP through `lean-csdp`, so BLAS/LAPACK must be
+The tactic calls CSDP through `csdp-ffi`, so BLAS/LAPACK must be
 available before Lean can load the native solver. If `lake build` or
 `lake test` fails while compiling or linking native code, run:
 
 ```
-(cd .lake/packages/leanCsdp && lake script run checkNativeDeps)
+(cd .lake/packages/CSDP && lake script run checkNativeDeps)
 ```
 
 That preflight reports the platform-specific packages or SDK paths
@@ -227,9 +227,9 @@ The tactic runs three stages on a `by sos` goal:
 |---|---|
 | [`leanprover-community/mathlib4`](https://github.com/leanprover-community/mathlib4) | `IsSumSq.nonneg`, `ℝ`, `algebraMap ℚ ℝ`, `ring`, `push_cast`. |
 | [`Verified-zkEVM/CompPoly`](https://github.com/Verified-zkEVM/CompPoly) | Computational `CMvPolynomial n R` substrate; sorry/axiom-free. |
-| [`kim-em/lean-csdp`](https://github.com/kim-em/lean-csdp) | FFI wrapper around CSDP 6.2.0. Vendored CSDP source. |
+| [`kim-em/csdp-ffi`](https://github.com/kim-em/csdp-ffi) | FFI wrapper around CSDP 6.2.0. Vendored CSDP source. |
 
-System dependencies (BLAS/LAPACK, transitively via lean-csdp):
+System dependencies (BLAS/LAPACK, transitively via csdp-ffi):
 
 | Platform | Packages |
 |----------|---|
