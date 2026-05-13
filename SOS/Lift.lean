@@ -47,11 +47,13 @@ type-class argument.
 
 ℕ/ℤ DIV/MOD are no longer rejected here: they're enriched in-place
 by `enrichDivMod` (see below), which introduces ℝ-typed witness
-equalities and bounds for each `a / b` / `a % b` site whose divisor
-is a positive numeric literal. Negative or zero divisors and
-non-literal divisors are still unsupported and reach the reifier
-which opacifies them as atoms — they won't generally certify but
-won't crash either. -/
+equalities and bounds for each `a / b` / `a % b` site. Sites whose
+divisor positivity is decidable by `omega` (positive numeric literals
+or non-literal divisors with `n ≠ 0` / `0 < n` / `m < n` in scope)
+get the full witness suite; the strict-bound witness is silently
+dropped for sites that don't, leaving an opaque atom for that site —
+the reifier still picks up the unconditional witnesses but the
+search may not certify. -/
 
 private def realConst : Expr := Lean.mkConst ``Real
 
@@ -74,7 +76,7 @@ partial def checkUnsupportedOps (e : Expr) : MetaM Unit := do
     | .mdata _ b => checkUnsupportedOps b
     | _ => pure ()
 
-/-! ### ℕ/ℤ DIV/MOD enrichment (issue #24)
+/-! ### ℕ/ℤ DIV/MOD enrichment (issue #24, #45)
 
 Harrison's `SOS_RULE` battery includes goals like `n ≤ n*n + n / 2 +
 n % 2` where the discrete-arithmetic operators `/` and `%` over
@@ -83,8 +85,8 @@ treating `a / b` as an opaque atom loses the algebraic relationship
 between divisor, quotient, and remainder.
 
 The enrichment pre-pass walks the post-binder-intro goal, finds each
-maximal `a / b` and `a % b` subterm (over ℕ or ℤ) whose divisor is a
-positive numeric literal, and introduces ℝ-typed witness hypotheses
+maximal `a / b` and `a % b` subterm (over ℕ or ℤ), and tries to
+introduce ℝ-typed witness hypotheses
 
   * `hdm : (a : ℝ) = b * (a / b) + a % b`        — div/mod identity
   * `hnn : (0 : ℝ) ≤ a % b`                       — remainder ≥ 0
@@ -95,51 +97,45 @@ SOS reifier then sees `↑(a/b)` and `↑(a%b)` as atoms tied together by
 the witness constraints, which is enough for Putinar / Schmüdgen-style
 certificates to use them.
 
-Negative or non-literal divisors are skipped (atom-only, will usually
-fail to certify). For ℤ we only handle `Int.ediv` / `Int.emod` (which
-is what `(a : Int) / (b : Int)` elaborates to in Lean 4); T-division
+Each `have` is wrapped in `try`, with the strict-bound witness routed
+through an `omega` call on `0 < b`. This subsumes both the positive
+literal divisor case (issue #24 — `omega` decides `0 < 7` trivially)
+and the non-literal divisor case (issue #45 — `omega` derives `0 < n`
+from any `n ≠ 0`, `0 < n`, `m < n`, etc. already in the local context).
+Sites whose positivity can't be derived just lose the strict-bound
+witness; the unconditional identity and remainder-nonneg facts are
+still added. For ℕ, `Nat.div_add_mod` and `Nat.zero_le` hold without
+preconditions; for ℤ, `Int.emod_nonneg` and `Int.emod_lt_of_pos` both
+require an `omega`-derived bound on the divisor.
+
+For ℤ we only handle `Int.ediv` / `Int.emod` (which is what
+`(a : Int) / (b : Int)` elaborates to in Lean 4); T-division
 `Int.div` would need different witness inequalities and is out of
 scope. -/
 
 /-- A DIV/MOD site to enrich: the source domain (ℕ or ℤ), the
-dividend `a`, the divisor expression `b`, and its positive literal
-value. The same `(domain, a, b)` triple may be the dividend/divisor
-of both `a / b` and `a % b`; we record one site for the pair. -/
+dividend `a`, and the divisor expression `b`. The same `(domain, a,
+b)` triple may be the dividend/divisor of both `a / b` and `a % b`;
+we record one site for the pair. -/
 private structure DivModSite where
   domain : Domain     -- `.nat` or `.int` only
   num    : Expr       -- the dividend `a`
   denExpr : Expr      -- the divisor expression `b`
-  denLit  : Nat       -- positive literal value of `b`
 
-/-- Extract a positive `Nat` literal from `e`, peeking through
-`OfNat.ofNat` and `Int.ofNat`. Returns `none` for non-literals,
-negative literals, or zero. -/
-private partial def positiveNatLit? (e : Expr) : MetaM (Option Nat) := do
-  let e ← whnfR e
-  if let some n := e.rawNatLit? then
-    return if n = 0 then none else some n
-  match_expr e with
-  | OfNat.ofNat _ n _ =>
-    let n ← whnfR n
-    let some k := n.rawNatLit? | return none
-    return if k = 0 then none else some k
-  | Int.ofNat a =>
-    let some n ← positiveNatLit? a | return none
-    return some n
-  | _ => return none
-
-/-- Look up an existing `DivModSite` matching `(domain, num, denLit)`.
-Compares `num` exprs via `isDefEq` at reducible transparency. -/
-private def findSite (sites : Array DivModSite) (domain : Domain) (num : Expr)
-    (denLit : Nat) : MetaM (Option DivModSite) := do
+/-- Look up an existing `DivModSite` matching `(domain, num, denExpr)`.
+Compares both `num` and `denExpr` via `isDefEq` at reducible
+transparency. -/
+private def findSite (sites : Array DivModSite) (domain : Domain) (num denExpr : Expr) :
+    MetaM (Option DivModSite) := do
   for s in sites do
-    if s.domain = domain && s.denLit = denLit then
+    if s.domain = domain then
       if ← Meta.withTransparency .reducible (Meta.isDefEq s.num num) then
-        return some s
+        if ← Meta.withTransparency .reducible (Meta.isDefEq s.denExpr denExpr) then
+          return some s
   return none
 
 /-- Walk `e` collecting DIV/MOD sites. `acc` is the running list of
-unique sites, keyed by `(domain, num, denLit)`.
+unique sites, keyed by `(domain, num, denExpr)`.
 
 Matches both the `HDiv.hDiv` / `HMod.hMod` user syntax form and the
 raw `Nat.div`, `Nat.mod`, `Int.ediv`, `Int.emod` constants in case a
@@ -149,9 +145,8 @@ partial def collectDivModSites (e : Expr) (acc : Array DivModSite := #[]) :
     MetaM (Array DivModSite) := do
   let record (domain : Domain) (a b : Expr) (acc : Array DivModSite) :
       MetaM (Array DivModSite) := do
-    let some k ← positiveNatLit? b | return acc
-    if (← findSite acc domain a k).isSome then return acc
-    return acc.push { domain, num := a, denExpr := b, denLit := k }
+    if (← findSite acc domain a b).isSome then return acc
+    return acc.push { domain, num := a, denExpr := b }
   let recordHDivOrHMod (α a b : Expr) (acc : Array DivModSite) :
       MetaM (Array DivModSite) := do
     let acc ← collectDivModSites a acc
@@ -201,7 +196,18 @@ partial def collectDivModSites (e : Expr) (acc : Array DivModSite := #[]) :
 
 The proofs route through the corresponding ℕ / ℤ lemma plus
 `push_cast` / `linarith`. The hypotheses are added in `0 ≤ …` form
-so `Reify.recogniseConstraint` picks them up directly. -/
+so `Reify.recogniseConstraint` picks them up directly.
+
+`hdm` (ℕ and ℤ) and ℕ's `hnn` are unconditional theorems and fail
+loudly if their proofs don't elaborate. The remaining facts — ℕ's
+`hgap`, both ℤ-side `hnn`/`hgap` — need divisor positivity, which
+routes through `by omega`; that side condition is wrapped in
+`first | have ... | skip` so a site whose divisor positivity can't
+be derived from the local context just loses the optional witness
+instead of aborting the lift. Sites with a positive literal divisor
+get all three witnesses (omega decides `0 < 7` trivially); sites
+with a non-literal divisor get the strict bound iff `b ≠ 0` /
+`0 < b` / etc. is already in scope. -/
 def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
   let a := site.num
   let b := site.denExpr
@@ -213,6 +219,8 @@ def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
   -- arithmetic normalisation in one shot.
   match site.domain with
   | .nat =>
+    -- `Nat.div_add_mod` and `Nat.zero_le` are unconditional; failures
+    -- here are bugs, not optional features, so we do not soft-fail.
     evalTactic <| ← `(tactic|
       have _sos_hdm : (($aStx : ℕ) : ℝ) = (($bStx : ℕ) : ℝ) * ((($aStx : ℕ) / $bStx : ℕ) : ℝ)
           + ((($aStx : ℕ) % $bStx : ℕ) : ℝ) :=
@@ -220,31 +228,48 @@ def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
     evalTactic <| ← `(tactic|
       have _sos_hnn : (0 : ℝ) ≤ ((($aStx : ℕ) % $bStx : ℕ) : ℝ) :=
         by exact_mod_cast Nat.zero_le (($aStx : ℕ) % $bStx))
+    -- `Nat.mod_lt` needs `0 < b`; route through `omega`, which decides
+    -- positive literals trivially and pulls positivity from in-scope
+    -- `b ≠ 0` / `0 < b` / `m < b` hypotheses for non-literal divisors.
+    -- Soft-failed: a site without an in-scope positivity fact simply
+    -- loses this witness.
     evalTactic <| ← `(tactic|
-      have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℕ) : ℝ) - ((($aStx : ℕ) % $bStx : ℕ) : ℝ) - 1 := by
-        have h : ($aStx : ℕ) % $bStx + 1 ≤ $bStx :=
-          Nat.mod_lt ($aStx : ℕ) (by decide)
-        have h' : ((($aStx : ℕ) % $bStx + 1 : ℕ) : ℝ) ≤ ((($bStx : ℕ) : ℝ)) :=
-          by exact_mod_cast h
-        push_cast at h' ⊢
-        linarith)
+      first
+        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℕ) : ℝ) - ((($aStx : ℕ) % $bStx : ℕ) : ℝ) - 1 := by
+            have hpos : (0 : ℕ) < ($bStx : ℕ) := by omega
+            have h : ($aStx : ℕ) % $bStx + 1 ≤ $bStx := Nat.mod_lt ($aStx : ℕ) hpos
+            have h' : ((($aStx : ℕ) % $bStx + 1 : ℕ) : ℝ) ≤ ((($bStx : ℕ) : ℝ)) :=
+              by exact_mod_cast h
+            push_cast at h' ⊢
+            linarith
+        | skip)
   | .int =>
+    -- `Int.emod_add_ediv` (via `Int.mul_ediv_add_emod`) is unconditional;
+    -- failures here are bugs.
     evalTactic <| ← `(tactic|
       have _sos_hdm : (($aStx : ℤ) : ℝ) = (($bStx : ℤ) : ℝ) * ((($aStx : ℤ) / $bStx : ℤ) : ℝ)
           + ((($aStx : ℤ) % $bStx : ℤ) : ℝ) :=
         by exact_mod_cast (Int.mul_ediv_add_emod ($aStx : ℤ) $bStx).symm)
+    -- `Int.emod_nonneg` needs `b ≠ 0`; `Int.emod_lt_of_pos` needs
+    -- `0 < b`. Both flow through `omega`; both soft-fail.
     evalTactic <| ← `(tactic|
-      have _sos_hnn : (0 : ℝ) ≤ ((($aStx : ℤ) % $bStx : ℤ) : ℝ) := by
-        have h : (0 : ℤ) ≤ ($aStx : ℤ) % $bStx := Int.emod_nonneg _ (by decide)
-        exact_mod_cast h)
+      first
+        | have _sos_hnn : (0 : ℝ) ≤ ((($aStx : ℤ) % $bStx : ℤ) : ℝ) := by
+            have hne : ($bStx : ℤ) ≠ 0 := by omega
+            have h : (0 : ℤ) ≤ ($aStx : ℤ) % $bStx := Int.emod_nonneg _ hne
+            exact_mod_cast h
+        | skip)
     evalTactic <| ← `(tactic|
-      have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℤ) : ℝ) - ((($aStx : ℤ) % $bStx : ℤ) : ℝ) - 1 := by
-        have h : ($aStx : ℤ) % $bStx + 1 ≤ $bStx :=
-          Int.add_one_le_iff.mpr (Int.emod_lt_of_pos _ (by decide))
-        have h' : ((($aStx : ℤ) % $bStx + 1 : ℤ) : ℝ) ≤ ((($bStx : ℤ) : ℝ)) :=
-          by exact_mod_cast h
-        push_cast at h' ⊢
-        linarith)
+      first
+        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℤ) : ℝ) - ((($aStx : ℤ) % $bStx : ℤ) : ℝ) - 1 := by
+            have hpos : (0 : ℤ) < ($bStx : ℤ) := by omega
+            have h : ($aStx : ℤ) % $bStx + 1 ≤ $bStx :=
+              Int.add_one_le_iff.mpr (Int.emod_lt_of_pos _ hpos)
+            have h' : ((($aStx : ℤ) % $bStx + 1 : ℤ) : ℝ) ≤ ((($bStx : ℤ) : ℝ)) :=
+              by exact_mod_cast h
+            push_cast at h' ⊢
+            linarith
+        | skip)
   | _ => pure ()
 
 /-- The shared user-name prefix for hypotheses introduced by
@@ -261,8 +286,10 @@ private def isWitnessHyp (name : Name) : Bool :=
   name.eraseMacroScopes.toString.startsWith witnessNamePrefix
 
 /-- Walk the current goal and all local hypothesis types, collect
-DIV/MOD sites with positive literal divisor, and introduce witness
-hypotheses for each.
+every DIV/MOD site over ℕ/ℤ, and introduce witness hypotheses for
+each. The conditional witnesses (strict-bound, plus ℤ remainder-nonneg)
+are routed through `omega` on the divisor positivity and silently
+dropped when omega fails; see `enrichSite`.
 
 Skips hypotheses already produced by a prior `enrichSite` (identified
 by `witnessNamePrefix`-prefixed user names) so this is idempotent
@@ -473,10 +500,10 @@ partial def liftToReal : TacticM Unit := withMainContext do
   -- is what the SOS reifier actually has to handle.
   introLeadingBindersAux
   -- DIV/MOD enrichment runs before `checkUnsupportedOps` so that
-  -- ℕ/ℤ `a / b` / `a % b` subterms with positive literal divisor are
-  -- supported (issue #24): we introduce witness equalities and bounds
-  -- here, then the SOS reifier treats `↑(a / b)` and `↑(a % b)` as
-  -- atoms tied together by those witnesses.
+  -- ℕ/ℤ `a / b` / `a % b` subterms are supported (issues #24 and
+  -- #45): we introduce witness equalities and bounds here, then the
+  -- SOS reifier treats `↑(a / b)` and `↑(a % b)` as atoms tied
+  -- together by those witnesses.
   enrichDivMod
   let mv ← getMainGoal
   let goal ← mv.getType >>= instantiateMVars
