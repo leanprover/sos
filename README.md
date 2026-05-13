@@ -163,6 +163,22 @@ invocation calls CSDP, rounds the Gram matrix, reconstructs the
 certificate, and checks it. A passing `lake test` is end-to-end
 verification of the search/round/reconstruct/verify pipeline.
 
+### Native dependency troubleshooting
+
+The tactic calls CSDP through `lean-csdp`, so BLAS/LAPACK must be
+available before Lean can load the native solver. If `lake build` or
+`lake test` fails while compiling or linking native code, run:
+
+```
+(cd .lake/packages/leanCsdp && lake script run checkNativeDeps)
+```
+
+That preflight reports the platform-specific packages or SDK paths
+expected by the native build. For examples that invoke CSDP, prefer
+Lake targets such as `lake test`; running a file directly with
+`lake env lean SomeFile.lean` may bypass the native link setup needed
+for the solver.
+
 ## Architecture
 
 The tactic runs three stages on a `by sos` goal:

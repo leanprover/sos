@@ -1,9 +1,19 @@
 import Lake
 open System Lake DSL
 
-/-! Per-platform BLAS / LAPACK link arguments. Lake does not propagate
-native-link arguments from a dependency to a downstream package's
-link step, so consumers of `lean-csdp` must replicate these. -/
+/-! Per-platform BLAS / LAPACK link arguments for this package's own
+native link steps.
+
+`lean-csdp` already carries these arguments for its own artifacts.
+We repeat them here because `SOS.Search` imports and calls `LeanCsdp`,
+so the `SOS` and `SOSTest` shared-library link steps also need to
+resolve the CSDP runtime dependencies.
+
+Normal downstream packages that depend on `sos`, import `SOS`, and use
+`by sos` do not need to copy these arguments into their lakefiles; they
+only need the system BLAS/LAPACK runtime installed. A downstream package
+that links directly against `LeanCsdp` in its own native target may
+still need equivalent arguments there. -/
 def blasLapackLinkArgs : Array String :=
   if System.Platform.isOSX then
     #["-Wl,-syslibroot,/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
