@@ -284,10 +284,15 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
   for c in constraints do
     let some gTree := castRawToPoly c.raw n |
       throwError "sos: constraint poly's maxAtomBound exceeds n = {n}"
-    let hExpr := Lean.mkFVar c.fvar
+    let hRaw := Lean.mkFVar c.fvar
     let gE := Lean.toExpr gTree
     match c.kind with
     | .nonneg =>
+      -- For general `a ≤ b` hypotheses, `c.orig = b − a` and the raw
+      -- FVar has type `a ≤ b`; `sub_nonneg_of_le` lifts it to the
+      -- canonical `0 ≤ b − a` shape `aeval_nonneg_of_orig` expects.
+      let hExpr ← if c.useSubBridge then mkAppM ``sub_nonneg_of_le #[hRaw]
+                  else pure hRaw
       let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
         #[some nE, some φE, some gE, some c.orig,
@@ -299,10 +304,15 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       let eqProof ← buildAtomicBridgeEq n φE gTree negOrig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig_neg
         #[some nE, some φE, some gE, some c.orig,
-          some eqProof, some hExpr]
+          some eqProof, some hRaw]
       accIneq := accIneq.push aProof
       polysIneq := polysIneq.push gTree
     | .pos =>
+      -- For general `a < b` hypotheses, `c.orig = b − a` and the raw
+      -- FVar has type `a < b`; `sub_pos_of_lt` lifts it to `0 < b − a`
+      -- before downgrading to `0 ≤ b − a` via `le_of_lt`.
+      let hExpr ← if c.useSubBridge then mkAppM ``sub_pos_of_lt #[hRaw]
+                  else pure hRaw
       let hLeExpr ← mkAppM ``le_of_lt #[hExpr]
       let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
       let aProof ← mkAppOptM ``SOS.aeval_nonneg_of_orig
@@ -316,7 +326,7 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       -- `sub_eq_zero_of_eq h : a − b = 0` we get `aeval x p.toCMv = 0`
       -- via `aeval_eq_zero_of_orig`.
       let eqProof ← buildAtomicBridgeEq n φE gTree c.orig
-      let hSubZero ← mkAppM ``sub_eq_zero_of_eq #[hExpr]
+      let hSubZero ← mkAppM ``sub_eq_zero_of_eq #[hRaw]
       let aProof ← mkAppOptM ``SOS.aeval_eq_zero_of_orig
         #[some nE, some φE, some gE, some c.orig,
           some eqProof, some hSubZero]

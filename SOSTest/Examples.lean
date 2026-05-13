@@ -101,6 +101,20 @@ example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
 -- `SOS/Verifier.lean`.
 example (x : ℝ) (_h : x ≤ 0) : 0 ≤ -x := by sos
 
+-- General `a ≤ b` / `a < b` hypotheses with non-zero literals: the
+-- reifier converts `h : a ≤ b` to `0 ≤ b − a` via `sub_nonneg.mpr`
+-- and `h : a < b` to `0 < b − a` via `sub_pos.mpr` (see issue #49).
+example (x : ℝ) (_h : x ≤ 1) : 0 ≤ 1 - x := by sos
+example (x : ℝ) (_h : 1 ≤ x) : 0 ≤ x - 1 := by sos
+example (x : ℝ) (_h : -1 ≤ x) : 0 ≤ x + 1 := by sos
+example (r t : ℝ) (_h1 : -1 ≤ t) (_h2 : t ≤ 1) :
+    0 ≤ 1 + r^2 - 2*r*t := by sos
+example (x y : ℝ) (_hx : 1 ≤ x) (_hy : 1 ≤ y) :
+    0 ≤ x*y - (x + y - 1) := by sos
+example (x : ℝ) (_h : x < 1) : 0 ≤ 1 - x := by sos
+-- Strict variable-vs-variable form: `h : x < y → 0 ≤ y − x`.
+example (x y : ℝ) (_h : x < y) : 0 ≤ y - x := by sos
+
 /-! ## §5. Equality hypotheses
 
 The certificate gains a free polynomial cofactor `qⱼ` per equality
