@@ -41,6 +41,14 @@ example (x y : ℝ) : 0 ≤ x^2 - 2*x*y + y^2 := by sos
 example (x y : ℝ) : 0 ≤ x^2 + 2*x*y + y^2 := by sos
 example (x : ℝ) : 0 ≤ x^4 - 2*x^2 + 1 := by sos
 
+-- Explicit pure-SOS surface: no hypotheses may contribute constraints.
+example (x y : ℝ) : 0 ≤ x^2 - 2*x*y + y^2 := by pure_sos
+
+/-- error: pure_sos: constraint hypotheses are not allowed
+-/
+#guard_msgs in
+example (x : ℝ) (_h : 0 ≤ x) : 0 ≤ x^2 := by pure_sos
+
 -- Cyclic Schur, 3 variables.
 example (a b c : ℝ) :
     0 ≤ a^2 + b^2 + c^2 - a*b - b*c - a*c := by sos

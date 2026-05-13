@@ -1182,6 +1182,18 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
         return some cert
   return none
 
+/-- Fast path for unconstrained closed SOS goals.
+
+This is Harrison's `PURE_SOS` shape: with no inequality/equality
+hypotheses, solve the single `σ₀` SDP directly in pure-feasibility mode.
+That avoids the general search's trace-cost attempt and multiplier/product
+setup while still using the configured σ₀ basis strategy. -/
+private def tryDirectSos (target : CMvPolynomial n ℚ)
+    (goal : Goal n) (basisStrategy : BasisStrategy := .newton)
+    (maxRoundingDenom : Nat := 1048576) : IO (Option (Certificate n)) :=
+  tryOneSdp target [] [] goal (useTraceCost := false) (extraDeg := 0)
+    basisStrategy maxRoundingDenom (maxSubsetCardinality := 1)
+
 /-- Closed-positivity / infeasibility search: produce a Certificate
 proving `target = σ₀ + Σᵢ σᵢ · gᵢ + Σⱼ qⱼ · pⱼ` for the chosen `target`.
 The equality list `ps` may be empty.
@@ -1231,6 +1243,12 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   let dropConstant := target.coeff (zeroMono n) = 0
   let symmetries := SOS.Symmetry.detectSymmetries target gs ps
   let useReducedPure := gs.isEmpty ∧ ps.isEmpty ∧ symmetries.size > 1
+  if gs.isEmpty ∧ ps.isEmpty ∧ !useReducedPure then
+    match goal with
+    | .closed _ =>
+      if let some cert ← tryDirectSos target goal basisStrategy maxRoundingDenom then
+        return some cert
+    | _ => pure ()
   let pruneAllowed : Bool := match goal with
     | .infeasible => false
     | _           => basisStrategy ≠ .dense

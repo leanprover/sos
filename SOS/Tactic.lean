@@ -521,6 +521,7 @@ def closeSosStrictProduct (parsed : SOS.Reify.ParsedGoal)
 
 syntax (name := sosTactic) "sos" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosTryTactic) "sos?" Lean.Parser.Tactic.optConfig : tactic
+syntax (name := pureSosTactic) "pure_sos" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosWitnessTactic)
   "sos_witness " term ("with" "ε" ":=" term)? : tactic
 syntax (name := sosWitnessExpTactic)
@@ -807,6 +808,24 @@ private def parseAndSearchAll (cfg : Config) (suggest? : Option Syntax)
     runSosTactic parsed cfg suggest? tag
   setGoals []
 
+/-- Parse and close all current goals as explicit `PURE_SOS` goals.
+Unlike `sos`, this tactic surface is deliberately unconstrained: any
+recognised constraint hypothesis is an error, and only closed
+non-negativity goals are accepted. -/
+private def parseAndPureSearchAll (cfg : Config) : TacticM Unit := do
+  let goals ← getGoals
+  for g in goals do
+    if ← g.isAssigned then continue
+    setGoals [g]
+    let some parsed ← SOS.Reify.parseGoalAtomic |
+      throwError "pure_sos: goal not in supported fragment"
+    unless parsed.shape matches .closed do
+      throwError "pure_sos: expected an unconstrained non-negativity goal"
+    unless parsed.constraints.isEmpty do
+      throwError "pure_sos: constraint hypotheses are not allowed"
+    runSosTactic parsed cfg none "pure_sos"
+  setGoals []
+
 /-- Run the lift pre-pass, then the SOS pipeline. The pre-pass may
 produce multiple subgoals (e.g. from an `Eq` conclusion split via
 `le_antisymm`), or close some subgoals outright (e.g. `n < n+1` over
@@ -961,10 +980,23 @@ private def runSosBool (cfg : Config) (suggest? : Option Syntax)
       {maxBoolDepth} (found {d}); flatten the goal or split manually"
   runSosBoolAux cfg suggest? tag
 
+/-- Entry point for `pure_sos`: introduce leading binders, run the same
+real-lift pre-pass as `sos`, then require each parsed goal to have no
+constraints before closing it. -/
+private def runPureSos (cfg : Config) : TacticM Unit := withMainContext do
+  SOS.Lift.introLeadingBindersAux
+  SOS.Lift.liftToReal
+  parseAndPureSearchAll cfg
+
 elab_rules : tactic
   | `(tactic| sos $cfg:optConfig) => do
     let cfg ← elabConfig cfg
     runSosBool cfg none "sos"
+
+elab_rules : tactic
+  | `(tactic| pure_sos $cfg:optConfig) => do
+    let cfg ← elabConfig cfg
+    runPureSos cfg
 
 elab_rules : tactic
   | `(tactic| sos?%$tk $cfg:optConfig) => do
