@@ -141,14 +141,14 @@ example (x y z w : ℝ) :
 example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
     0 ≤ (x^2 + y^2)^2 - x*y*(x + y)^2 := by sos
 
--- FIXME sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The natural
+-- sos.ml:1654 — `x ≥ 1 ∧ y ≥ 1 ⇒ x*y ≥ x + y - 1`. The natural
 -- certificate is `(x-1)(y-1) = 1·g₁·g₂`, i.e. a *product* of the two
 -- inequality multipliers — a preordering term, not a quadratic-module
--- term `σ₀ + Σ σᵢ·gᵢ`. Iterative deepening (any `maxDepth`) grows σᵢ
--- but doesn't add product terms `σᵢⱼ·gᵢ·gⱼ`, so the search stays
--- infeasible. Cure is preordering-style (Schmüdgen) encoding.
--- example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
---     0 ≤ x*y - (x + y - 1) := by sos
+-- term `σ₀ + Σ σᵢ·gᵢ`. Closed via Schmüdgen-style enumeration of
+-- constraint products (issue #38); the search tries Putinar first
+-- (which fails here) and falls back to the preordering monoid.
+example (x y : ℝ) (_hx : 0 ≤ x - 1) (_hy : 0 ≤ y - 1) :
+    0 ≤ x*y - (x + y - 1) := by sos
 
 -- FIXME sos.ml:1657 — strict version of the above. The closed
 -- inequality is tight at `x = y = 1` (boundary of `x ≥ 1, y ≥ 1`),
@@ -159,19 +159,18 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 -- example (x y : ℝ) (_hx : 0 < x - 1) (_hy : 0 < y - 1) :
 --     0 < x*y - (x + y - 1) := by sos
 
--- FIXME sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`.
--- Putinar form needs degree-2 multipliers on the linear hypotheses;
--- raising `maxDepth` grows the basis but CSDP still can't round to
--- a valid Gram at any depth I've tried. Newton pruning (#23) doesn't
--- fix it either — diagnosis is rounding / preordering, not basis
--- size. Confirmed failing through `maxDepth := 2`.
--- example (x y z : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_hz : 0 ≤ z)
---     (_hs : x + y + z - 3 ≤ 0) :
---     0 ≤ x*y + x*z + y*z - 3*x*y*z := by sos
+-- sos.ml:1643 — `0 ≤ x,y,z ∧ x+y+z ≤ 3 ⇒ xy+xz+yz ≥ 3xyz`. Closes
+-- via the Schmüdgen-style preordering enumeration (issue #38).
+example (x y z : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) (_hz : 0 ≤ z)
+    (_hs : x + y + z - 3 ≤ 0) :
+    0 ≤ x*y + x*z + y*z - 3*x*y*z := by sos
 
--- FIXME sos.ml:1682 — interval `[2,4]³` Schur. Six interval
--- hypotheses blow up the SDP at the fixed relaxation level
--- (>60s timeout in isolation).
+-- FIXME sos.ml:1682 — interval `[2,4]³` Schur. The preordering
+-- enumeration from issue #38 is in place: 6 linear constraints produce
+-- 6 singleton + 15 pair σ-blocks (triples and above are degree-filtered).
+-- The SDP solves but rounding doesn't validate at any depth ≤ 1 with
+-- the default denominator schedule. Probably needs targeted denominator
+-- tuning or a smaller `maxSubsetCardinality` to recover. Left as FIXME.
 -- example (x y z : ℝ)
 --     (_hx1 : 0 ≤ x - 2) (_hx2 : 0 ≤ 4 - x)
 --     (_hy1 : 0 ≤ y - 2) (_hy2 : 0 ≤ 4 - y)
@@ -179,7 +178,8 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 --     0 ≤ 2*(x*z + x*y + y*z) - (x^2 + y^2 + z^2) := by sos
 
 -- FIXME sos.ml:1672 — dodecahedral, intervals to `125841/50000`. Same
--- shape as 1682; same blow-up.
+-- shape as 1682; same residual rounding issue under issue #38's
+-- preordering enumeration.
 -- example (x y z : ℝ)
 --     (_hx1 : 0 ≤ x - 2) (_hx2 : 0 ≤ 125841/50000 - x)
 --     (_hy1 : 0 ≤ y - 2) (_hy2 : 0 ≤ 125841/50000 - y)
@@ -187,7 +187,10 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 --     0 ≤ 2*(x*z + x*y + y*z) - (x^2 + y^2 + z^2) := by sos
 
 -- FIXME sos.ml:1690 — sharp `≥ 12` bound on the same interval.
--- Harrison reports needing depth 12; iterative deepening required.
+-- Harrison reports needing depth 12 with his Schmüdgen encoding;
+-- our preordering machinery from issue #38 is in place but the depth
+-- cap plus per-attempt cost makes the full sweep impractical at default
+-- settings.
 -- example (x y z : ℝ)
 --     (_hx1 : 0 ≤ x - 2) (_hx2 : 0 ≤ 4 - x)
 --     (_hy1 : 0 ≤ y - 2) (_hy2 : 0 ≤ 4 - y)

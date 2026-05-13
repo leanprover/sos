@@ -241,14 +241,18 @@ The cofactor `qⱼ` needs degree headroom up to `σ₀Deg − pⱼ.totalDegree`.
 
 /-! ### Building per-block bases -/
 
-/-- Per-block data: the basis (monomials), the multiplier polynomial
-(`g_b`, with `g_0 = 1`), and the block size. Block 0 is the σ₀ block. -/
+/-- Per-block data: the subset of constraint indices `idxs ⊆ [0, |gs|)`
+this block represents, the monomial basis, and the multiplier polynomial
+`∏_{i ∈ idxs} gs[i]`. The empty subset corresponds to the σ₀ block with
+multiplier `1`; singletons `[i]` correspond to the Putinar σᵢ blocks;
+higher cardinalities are Schmüdgen-style preordering blocks. -/
 structure BlockSpec (n : Nat) where
+  idxs : List Nat := []
   basis : Array (CMvMonomial n)
   multiplier : CMvPolynomial n ℚ
 
 instance : Inhabited (BlockSpec n) where
-  default := { basis := #[], multiplier := CMvPolynomial.C 0 }
+  default := { idxs := [], basis := #[], multiplier := CMvPolynomial.C 0 }
 
 namespace BlockSpec
 @[inline] def size (b : BlockSpec n) : Nat := b.basis.size
@@ -268,27 +272,75 @@ namespace EqCofactorSpec
 @[inline] def size (e : EqCofactorSpec n) : Nat := e.basis.size
 end EqCofactorSpec
 
+/-- Enumerate non-empty subsets of `[0, gs.length)` whose product has
+total degree `≤ maxDeg` and cardinality `≤ maxCard`. Each entry pairs
+the subset of indices (sorted ascending) with the product polynomial.
+Mirrors Harrison's `enumerate_products` (sos.ml:889) modulo the trivial
+empty subset (which the caller injects as the σ₀ block). Indices are
+generated in lex order, products are accumulated incrementally to avoid
+recomputation. Constant-polynomial constraints are filtered (their
+inclusion in a product is redundant). -/
+def enumerateConstraintProducts (maxDeg maxCard : Nat)
+    (gs : Array (CMvPolynomial n ℚ)) :
+    Array (List Nat × CMvPolynomial n ℚ) := Id.run do
+  let mut results : Array (List Nat × CMvPolynomial n ℚ) := #[]
+  if maxCard = 0 then return results
+  let count := gs.size
+  -- Level 1: singletons (filter constants and degree-overflow).
+  let mut prev : Array (List Nat × CMvPolynomial n ℚ) := #[]
+  for i in [0:count] do
+    let g := gs.getD i 0
+    if g.totalDegree = 0 then continue
+    if g.totalDegree > maxDeg then continue
+    prev := prev.push ([i], g)
+  results := results ++ prev
+  -- Level k+1: extend each (idxs, prod) by an index strictly larger than
+  -- the maximum index already in `idxs` (kept sorted ascending; the last
+  -- element is the maximum).
+  for _ in [1:maxCard] do
+    if prev.isEmpty then break
+    let mut next : Array (List Nat × CMvPolynomial n ℚ) := #[]
+    for (idxs, prod) in prev do
+      let startIdx := match idxs.getLast? with
+        | some k => k + 1
+        | none   => 0
+      for j in [startIdx:count] do
+        let g := gs.getD j 0
+        if g.totalDegree = 0 then continue
+        let prod' := prod * g
+        if prod'.totalDegree > maxDeg then continue
+        next := next.push (idxs ++ [j], prod')
+    results := results ++ next
+    prev := next
+  return results
+
 /-- Build the per-block specs from the target polynomial and constraint
-list. Block 0 is σ₀ (multiplier = 1); block i+1 is σᵢ (multiplier = gᵢ).
+list. Block 0 is σ₀ (idxs = `[]`, multiplier = 1); subsequent blocks are
+indexed by subsets `S ⊆ [0, gs.length)` with `|S| ≥ 1` enumerated by
+`enumerateConstraintProducts`. `maxSubsetCardinality = 1` recovers
+the Putinar quadratic-module encoding (one σᵢ per constraint); higher
+values enumerate Schmüdgen-style preordering products (e.g. `g₁·g₂`).
+
 The `ps` argument provides equality polynomials whose total degree
-participates in σ₀ sizing — `target = σ₀ + Σᵢ σᵢ·gᵢ + Σⱼ qⱼ·pⱼ` may
-need σ₀ to absorb cancellations against `qⱼ·pⱼ` of degree close to
+participates in σ₀ sizing — `target = Σ_S σ_S·∏_{i ∈ S} gᵢ + Σⱼ qⱼ·pⱼ`
+may need σ₀ to absorb cancellations against `qⱼ·pⱼ` of degree close to
 `σ₀Deg`.
 
 `extraDeg` raises the relaxation level: it is added to both the σ₀
-basis degree and to every σᵢ multiplier basis degree, growing each
+basis degree and to every σ_S multiplier basis degree, growing each
 Gram matrix accordingly. `extraDeg = 0` is the original fixed-level
 encoding; iterative-deepening drivers loop `extraDeg = 0, 1, …`.
 
 `strategy` selects the σ₀ basis: `.dense` (complete, default) or
 `.newton` (half-Newton-polytope from Reznick — sound pruning via
-exact-rational LP). The pruning is only applied to σ₀ — constraint
-multipliers σᵢ have no analogous heuristic. The deepening driver is
+exact-rational LP). The pruning is only applied to σ₀ — product
+multipliers σ_S have no analogous heuristic. The deepening driver is
 responsible for falling back to `.dense` if a pruned attempt fails. -/
 def buildBlocks (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := []) (extraDeg : Nat := 0)
-    (strategy : BasisStrategy := .dense) :
+    (strategy : BasisStrategy := .dense)
+    (maxSubsetCardinality : Nat := 1) :
     Array (BlockSpec n) := Id.run do
   let targetDeg := target.totalDegree
   let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
@@ -301,13 +353,21 @@ def buildBlocks (target : CMvPolynomial n ℚ)
     if target.coeff (zeroMono n) = 0 then
       σ₀Basis.filter (fun m => m ≠ zeroMono n)
     else σ₀Basis
-  blocks := blocks.push { basis := σ₀Basis, multiplier := CMvPolynomial.C 1 }
-  for g in gs do
-    let gDeg := g.totalDegree
-    let basisDeg := multiplierBasisDeg σ₀Deg gDeg + extraDeg
+  blocks := blocks.push
+    { idxs := [], basis := σ₀Basis, multiplier := CMvPolynomial.C 1 }
+  -- Product degree cap grows with `extraDeg`: a relaxation that adds
+  -- `extraDeg` to every σ-block basis-degree gives `2 * extraDeg` extra
+  -- room on the polynomial degree, so products with degree up to
+  -- `σ₀Deg + 2 * extraDeg` can still combine with a non-trivial σ_S
+  -- multiplier (basis degree ≥ 0). Without this, deeper relaxations
+  -- never admit higher-degree product subsets.
+  let products := enumerateConstraintProducts (σ₀Deg + 2 * extraDeg)
+                    maxSubsetCardinality gs.toArray
+  for (idxs, prod) in products do
+    let basisDeg := multiplierBasisDeg σ₀Deg prod.totalDegree + extraDeg
     let basis := monomialsUpTo n basisDeg
     let basis := if basis.size == 0 then monomialsUpTo n 0 else basis
-    blocks := blocks.push { basis := basis, multiplier := g }
+    blocks := blocks.push { idxs, basis, multiplier := prod }
   return blocks
 
 /-- Build per-equality cofactor specs. The cofactor basis for `pⱼ` has
@@ -416,10 +476,11 @@ blocks zero weight — otherwise the objective drives `x⁺` and `x⁻` to
 infinity together. -/
 def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
     (mode : SdpMode := .feasibility) (ps : List (CMvPolynomial n ℚ) := [])
-    (extraDeg : Nat := 0) (strategy : BasisStrategy := .dense) :
+    (extraDeg : Nat := 0) (strategy : BasisStrategy := .dense)
+    (maxSubsetCardinality : Nat := 1) :
     LeanCsdp.Problem × Array (BlockSpec n) × Array (EqCofactorSpec n) ×
       Array (CMvMonomial n) × Option Nat :=
-  let σBlocks := buildBlocks target gs ps extraDeg strategy
+  let σBlocks := buildBlocks target gs ps extraDeg strategy maxSubsetCardinality
   let eqSpecs := buildEqCofactorSpecs target gs ps extraDeg
   let hasEqs := !ps.isEmpty
   let cumOffsets : Array Nat := Id.run do
@@ -580,21 +641,24 @@ empirically better than a strict doubling schedule — the densified
 small region and 1.5× interleaves catch Gram denominators that the
 old `[1..31] ++ [2^5..2^20]` schedule missed.
 
-Harrison's HOL Light caps at `2^66`; we cap at `2^20`. Beyond that
+Harrison's HOL Light caps at `2^66`; we cap at `2^24`. Beyond that
 range, CSDP rounding noise produces tiny positive `LDL` pivots whose
 `fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
 practical wall time. The `maxRoundingDenom` field of `SOS.Config` (see
 `SOS/Tactic.lean`) filters the *full* candidate list — schedule entries,
 `polyDenom target`, constraint denoms, and cross denoms — against the
-cap; the schedule itself still tops out at `2^20`. Targets needing a
-strictly larger denom fall through to `sos_witness <hand-cert>`. -/
+cap. Targets needing a strictly larger denom fall through to
+`sos_witness <hand-cert>`. -/
 def niceDenominators : List ℚ :=
   let smalls : List ℚ := (List.range 63).map (fun i => (i + 1 : ℚ))
-  -- For k = 6..19, alternate `2^k` and `3·2^(k-1) = 1.5·2^k`; then `2^20`.
+  -- For k = 6..23, alternate `2^k` and `3·2^(k-1) = 1.5·2^k`; then `2^24`.
+  -- The extended range (past `2^20`) gives the Schmüdgen preordering
+  -- room for product-block Grams whose denominator grows with subset
+  -- cardinality (issue #38).
   let bigs : List ℚ :=
-    (List.range 14).flatMap
+    (List.range 18).flatMap
         (fun i => [(2 ^ (i + 6) : ℚ), ((3 : ℚ) * 2 ^ (i + 5))])
-      ++ [(2 ^ 20 : ℚ)]
+      ++ [(2 ^ 24 : ℚ)]
   smalls ++ bigs
 
 /-- Round a single float to the nearest rational at denominator `d`,
@@ -782,19 +846,14 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
   let hasEqs := !ps.isEmpty
   let expectedSize := blocks.size + (if hasEqs then 2 else 0)
   if Qs.size ≠ expectedSize then return none
-  let some block0 := blocks[0]? | return none
-  let some Q0 := Qs[0]? | return none
-  let some sigma0Squares :=
-    LDL.reconstruct block0.size Q0 (basisAsPolys block0.basis)
-    | return none
-  let mut sigmas : Array (SOSDecomp n) := Array.mkEmpty (blocks.size - 1)
-  for blockIdx in [1:blocks.size] do
+  let mut sigmas : Array (List Nat × SOSDecomp n) := Array.mkEmpty blocks.size
+  for blockIdx in [0:blocks.size] do
     let some block := blocks[blockIdx]? | return none
     let some Q := Qs[blockIdx]? | return none
     let some sigmaSquares :=
       LDL.reconstruct block.size Q (basisAsPolys block.basis)
       | return none
-    sigmas := sigmas.push { squares := sigmaSquares }
+    sigmas := sigmas.push (block.idxs, { squares := sigmaSquares })
   let mut eqCofs : List (CMvPolynomial n ℚ) := []
   if hasEqs then
     let some xPosDiag := Qs[blocks.size]? | return none
@@ -808,9 +867,7 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
       offset := offset + spec.size
     eqCofs := acc.toList
   let cert : Certificate n :=
-    { sigma0 := { squares := sigma0Squares },
-      sigmas := sigmas.toList,
-      eqCofs := eqCofs }
+    { sigmas := sigmas.toList, eqCofs := eqCofs }
   if cert.checks goal gs ps then return some cert
   return none
 
@@ -1024,7 +1081,7 @@ private def tryReducedDenominator (block : BlockSpec n) (mats : Array (Array ℚ
     LDL.reconstruct block.size Q (basisAsPolys block.basis)
     | return none
   let cert : Certificate n :=
-    { sigma0 := { squares := sigma0Squares }, sigmas := [], eqCofs := [] }
+    { sigmas := [([], { squares := sigma0Squares })], eqCofs := [] }
   if cert.checks goal [] [] then return some cert
   return none
 
@@ -1040,10 +1097,11 @@ private def tryReducedPureSdp (target : CMvPolynomial n ℚ) (goal : Goal n)
   if extraDeg ≠ 0 then
     return none
   let block : BlockSpec n :=
-    { basis := harrisonNewtonBasis target, multiplier := CMvPolynomial.C 1 }
+    { idxs := [],
+      basis := harrisonNewtonBasis target, multiplier := CMvPolynomial.C 1 }
   if block.size = 0 then
     if target = 0 then
-      return some { sigma0 := { squares := [] }, sigmas := [], eqCofs := [] }
+      return some { sigmas := [([], { squares := [] })], eqCofs := [] }
     else
       return none
   let some (eqs, _monos) := symmetricPureEquations target block symmetries
@@ -1057,7 +1115,7 @@ private def tryReducedPureSdp (target : CMvPolynomial n ℚ) (goal : Goal n)
       LDL.reconstruct block.size Q (basisAsPolys block.basis)
       | return none
     let cert : Certificate n :=
-      { sigma0 := { squares := sigma0Squares }, sigmas := [], eqCofs := [] }
+      { sigmas := [([], { squares := sigma0Squares })], eqCofs := [] }
     if cert.checks goal [] [] then return some cert else return none
   let mats := gramMats block.size param
   let problem := buildReducedProblem block.size mats
@@ -1083,13 +1141,14 @@ private def tryOneSdp (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (useTraceCost : Bool) (extraDeg : Nat)
     (strategy : BasisStrategy := .dense)
-    (maxRoundingDenom : Nat := 1048576) : IO (Option (Certificate n)) := do
+    (maxRoundingDenom : Nat := 1048576)
+    (maxSubsetCardinality : Nat := 1) : IO (Option (Certificate n)) := do
   let (problem, blocks, eqSpecs, _monos, _) :=
     buildSdp target gs (.feasibility useTraceCost) ps extraDeg strategy
+      maxSubsetCardinality
   if problem.b.size = 0 then
     if target = 0 then
-      return some { sigma0 := { squares := [] },
-                    sigmas := gs.map fun _ => { squares := [] },
+      return some { sigmas := [([], { squares := [] })],
                     eqCofs := ps.map fun _ => CMvPolynomial.C 0 }
     else
       return none
@@ -1141,7 +1200,8 @@ Same config struct on the tactic side. -/
 def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (maxRoundingDenom : Nat := 1048576)
-    (maxDepth : Nat := 0) (basisStrategy : BasisStrategy := .newton) :
+    (maxDepth : Nat := 0) (basisStrategy : BasisStrategy := .newton)
+    (maxSubsetCardinality : Nat := 1) :
     IO (Option (Certificate n)) := do
   -- Cost-matrix strategies, in order. Trace maximisation gives CSDP
   -- a well-defined central path on rank-deficient SDPs (Harrison's
@@ -1174,36 +1234,48 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   let pruneAllowed : Bool := match goal with
     | .infeasible => false
     | _           => basisStrategy ≠ .dense
+  -- Cardinality schedule: at each relaxation depth, first try Putinar
+  -- (max-cardinality 1, no product blocks — cheap when it works); if that
+  -- fails fall back to Schmüdgen-style enumeration up to the caller's
+  -- cap. Depth-outer keeps the easy Putinar cases fast while still
+  -- letting Schmüdgen close interval-Schur-style targets at the same
+  -- depth before the search bumps to the next, more expensive depth.
+  let putinarCap : Nat := 1
+  let fullCap : Nat := min maxSubsetCardinality gs.length
+  let cardinalitySchedule : List Nat :=
+    if fullCap ≤ putinarCap then [putinarCap]
+    else [putinarCap, fullCap]
   for extraDeg in [0:maxDepth + 1] do
-    let basisDeg := halfCeil σ₀Deg + extraDeg
-    let fullBasisSize := (monomialsUpTo n basisDeg).size
-    -- Sparsity gate (`4·|support| < C(n+D, D)`): for visibly dense
-    -- targets the pruning is unlikely to shrink the basis enough to
-    -- matter — and small σ₀ blocks (single-monomial bases on a
-    -- target with multiple-monomial supports) can drive CSDP into a
-    -- degenerate SDP that segfaults the FFI. We compute the pruned
-    -- basis only when the gate clears, and additionally require the
-    -- post-dropConstant size to be ≥ 2 and strictly less than dense.
-    -- The `≥ 2` floor is a defence against the CSDP crash on
-    -- pathologically small σ₀ blocks.
-    let basisStrategies : List BasisStrategy :=
-      if !pruneAllowed then [.dense]
-      else if 4 * supportSize ≥ fullBasisSize then [.dense]
-      else
-        let pruned := basisStrategy.basisAt target basisDeg
-        let post := if dropConstant then pruned.filter (· ≠ zeroMono n) else pruned
-        if 2 ≤ post.size ∧ post.size < fullBasisSize
-          then [basisStrategy, .dense] else [.dense]
-    for strat in basisStrategies do
-      for useTraceCost in costStrategies do
-        if useReducedPure then
-          if let some cert ← tryReducedPureSdp target goal useTraceCost extraDeg
-              strat maxRoundingDenom symmetries then
-            return some cert
+    for maxCard in cardinalitySchedule do
+      let basisDeg := halfCeil σ₀Deg + extraDeg
+      let fullBasisSize := (monomialsUpTo n basisDeg).size
+      -- Sparsity gate (`4·|support| < C(n+D, D)`): for visibly dense
+      -- targets the pruning is unlikely to shrink the basis enough to
+      -- matter — and small σ₀ blocks (single-monomial bases on a
+      -- target with multiple-monomial supports) can drive CSDP into a
+      -- degenerate SDP that segfaults the FFI. We compute the pruned
+      -- basis only when the gate clears, and additionally require the
+      -- post-dropConstant size to be ≥ 2 and strictly less than dense.
+      -- The `≥ 2` floor is a defence against the CSDP crash on
+      -- pathologically small σ₀ blocks.
+      let basisStrategies : List BasisStrategy :=
+        if !pruneAllowed then [.dense]
+        else if 4 * supportSize ≥ fullBasisSize then [.dense]
         else
-          if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
-              strat maxRoundingDenom then
-            return some cert
+          let pruned := basisStrategy.basisAt target basisDeg
+          let post := if dropConstant then pruned.filter (· ≠ zeroMono n) else pruned
+          if 2 ≤ post.size ∧ post.size < fullBasisSize
+            then [basisStrategy, .dense] else [.dense]
+      for strat in basisStrategies do
+        for useTraceCost in costStrategies do
+          if useReducedPure then
+            if let some cert ← tryReducedPureSdp target goal useTraceCost extraDeg
+                strat maxRoundingDenom symmetries then
+              return some cert
+          else
+            if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
+                strat maxRoundingDenom maxCard then
+              return some cert
   return none
 
 /-! ### Strict positivity via LP-slack maximisation
@@ -1246,7 +1318,8 @@ window admits a verifiable certificate. -/
 def runStrict (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
     (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
-    (basisStrategy : BasisStrategy := .newton) :
+    (basisStrategy : BasisStrategy := .newton)
+    (maxSubsetCardinality : Nat := 1) :
     IO (Option (StrictResult n)) := do
   -- Iteratively deepen alongside `runFeasibilitySearch`: each outer
   -- pass re-runs the LP-slack solve at the higher relaxation. Each
@@ -1263,7 +1336,7 @@ def runStrict (p : CMvPolynomial n ℚ)
     -- the gain from pruning here is small compared to the inner
     -- feasibility loops, which do honour `basisStrategy`.
     let (problem, _σBlocks, _eqSpecs, _monos, lambdaBlockIdx?) :=
-      buildSdp p gs .lpSlack ps extraDeg
+      buildSdp p gs .lpSlack ps extraDeg .dense maxSubsetCardinality
     let some lambdaBlockIdx := lambdaBlockIdx? | return none
     -- Same pre-CSDP conditioning as `tryOneSdp`. `λ` lives in a primal
     -- block of `sol.X`, so it scales with `X*` and `unscaleSolution`
@@ -1298,7 +1371,8 @@ def runStrict (p : CMvPolynomial n ℚ)
         let goal : Goal n := .strict p ε hε
         let targetPoly := p - CMvPolynomial.C ε
         match (← runFeasibilitySearch targetPoly gs ps goal maxRoundingDenom
-            (maxDepth := extraDeg) (basisStrategy := basisStrategy)) with
+            (maxDepth := extraDeg) (basisStrategy := basisStrategy)
+            (maxSubsetCardinality := maxSubsetCardinality)) with
         | some cert => return some { cert, ε, hε }
         | none => pure ()
   return none
@@ -1311,13 +1385,16 @@ routes `.strict` goals straight to `runStrict`). -/
 def runSearch (goal : Goal n) (gs : List (CMvPolynomial n ℚ))
     (ps : List (CMvPolynomial n ℚ) := [])
     (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
-    (basisStrategy : BasisStrategy := .newton) :
+    (basisStrategy : BasisStrategy := .newton)
+    (maxSubsetCardinality : Nat := 1) :
     IO (Option (Certificate n)) := do
   match goal with
   | .closed p   =>
     runFeasibilitySearch p gs ps goal maxRoundingDenom maxDepth basisStrategy
+      maxSubsetCardinality
   | .infeasible =>
     runFeasibilitySearch (-1) gs ps goal maxRoundingDenom maxDepth basisStrategy
+      maxSubsetCardinality
   | .strict ..  => return none
 
 end SOS.Search
