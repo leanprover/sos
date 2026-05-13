@@ -96,6 +96,14 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 -- elaborator via `le_of_lt`.
 example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
 
+-- Boundary-tight strict goal (issue #46). `runStrict`'s LP-slack pass
+-- correctly fails — `x² → 0` as `x → 0⁺`, so no uniform `ε > 0`
+-- admits `x² ≥ ε` for all `x > 0`. Closed via the strict-product
+-- Positivstellensatz fallback: `pol = x`, `i = 2` gives
+-- `−x² = 1 · (−x²)` against augmented `[x, −x²]`, with `x² > 0`
+-- recovered structurally from `0 < x` via `mul_pos`.
+example (x : ℝ) (_h : 0 < x) : 0 < x^2 := by sos
+
 -- Nonpos hypothesis (`h : x ≤ 0`), driving the `.neg`-wrapping in
 -- `recogniseConstraint` and the `aeval_nonneg_of_orig_neg` bridge in
 -- `SOS/Verifier.lean`.
@@ -216,6 +224,19 @@ example (x : ℝ) : 0 < x^2 + 1 := by sos?
 
 example (x : ℝ) : 0 < x^2 + 1 := by
   sos_witness { sigmas := [([], { squares := [CMvPolynomial.X 0] })] } with ε := (1 : ℚ)
+
+-- For boundary-tight strict goals (issue #46), `sos?` emits the
+-- replayable `sos_witness <cert> with exponent := <n>` form. The
+-- inline cert verifies `−pol^n` against the augmented inequality
+-- list `gs ++ [−p]`. The exact CSDP-found cert isn't a stable
+-- string (Gram entries depend on the SDP solver path), so we only
+-- check that the hand-rolled minimal witness replays. The minimal
+-- cert here is `σ_{[1]} = 1`, contributing `1 · (−x²) = −x²` against
+-- `gs ++ [-p] = [x, -x²]`.
+example (x : ℝ) (_h : 0 < x) : 0 < x^2 := by
+  sos_witness
+    { sigmas := [([1], { squares := [CMvPolynomial.C (1 : ℚ)] })] }
+    with exponent := 2
 
 -- For equality goals the suggestion includes `eqCofs := …`.
 /-- info: Try this:

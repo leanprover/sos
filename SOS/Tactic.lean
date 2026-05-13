@@ -235,6 +235,23 @@ private def buildForallMemProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
     mkLambdaFVars #[gFV] body
   buildForallMemProofGen n gs hAevalProofs predicate
 
+/-- Build a proof of `∀ g ∈ gsList, 0 < CMvPolynomial.aeval x g`, given
+per-hypothesis proofs `hP i : 0 < aeval x gs[i].toCMv`. Strict-positivity
+companion to `buildForallMemProof`, consumed by the strict-product
+Positivstellensatz close path. -/
+private def buildForallMemStrictProof (n : Nat) (xE : Expr) (gs : List (SOS.Poly n))
+    (hAevalProofs : List Expr) : MetaM Expr := do
+  let cmvTy ← cmvType n
+  let predicate ← withLocalDeclD `g cmvTy fun gFV => do
+    let body ← mkAppM ``LT.lt
+      #[(← mkAppOptM ``OfNat.ofNat
+          #[some realTy, some (Lean.mkNatLit 0), none]),
+        (← mkAppOptM ``CPoly.CMvPolynomial.aeval
+          #[some (Lean.mkNatLit n), some ratTy, some realTy,
+            none, none, none, some xE, some gFV])]
+    mkLambdaFVars #[gFV] body
+  buildForallMemProofGen n gs hAevalProofs predicate
+
 /-- Build a proof of `∀ p ∈ psList, CMvPolynomial.aeval x p = 0`, given
 per-hypothesis proofs `hP i : aeval x ps[i].toCMv = 0`. -/
 private def buildForallMemEqZeroProof (n : Nat) (xE : Expr)
@@ -264,12 +281,21 @@ Builds `0 ≤ aeval φ g_i.toCMv` for inequality constraints and
 `aeval φ p_j.toCMv = 0` for equality constraints, dispatching on
 `ConstraintKind`. -/
 
-/-- Bundle of bridged proofs partitioned by constraint kind. -/
+/-- Bundle of bridged proofs partitioned by constraint kind.
+
+`strictPosProofs` / `strictPosPolys` record the *strict* (`0 < g`)
+inequality hypotheses, with their lifted `0 < aeval φ g.toCMv` proofs.
+The same hypotheses also appear (downgraded to `0 ≤ aeval φ g.toCMv`)
+in `ineqProofs` / `ineqPolys`, so the cone-side bridge is unchanged;
+the strict-product Positivstellensatz path consumes these extra
+strict-positivity facts. -/
 private structure BridgedConstraints (n : Nat) where
   ineqProofs : List Expr
   ineqPolys  : List (SOS.Poly n)
   eqProofs   : List Expr
   eqPolys    : List (SOS.Poly n)
+  strictPosProofs : List Expr := []
+  strictPosPolys  : List (SOS.Poly n) := []
 
 /-- Build per-hypothesis bridged proofs from the ParsedGoal's
 constraints, partitioning into inequality and equality halves. -/
@@ -281,6 +307,8 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
   let mut polysIneq : Array (SOS.Poly n) := #[]
   let mut accEq : Array Expr := #[]
   let mut polysEq : Array (SOS.Poly n) := #[]
+  let mut accStrict : Array Expr := #[]
+  let mut polysStrict : Array (SOS.Poly n) := #[]
   for c in constraints do
     let some gTree := castRawToPoly c.raw n |
       throwError "sos: constraint poly's maxAtomBound exceeds n = {n}"
@@ -320,6 +348,13 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
           some eqProof, some hLeExpr]
       accIneq := accIneq.push aProof
       polysIneq := polysIneq.push gTree
+      -- Also build the strict-positive bridge `0 < aeval φ g.toCMv`
+      -- consumed by the strict-product Positivstellensatz path.
+      let aPosProof ← mkAppOptM ``SOS.aeval_pos_of_orig
+        #[some nE, some φE, some gE, some c.orig,
+          some eqProof, some hExpr]
+      accStrict := accStrict.push aPosProof
+      polysStrict := polysStrict.push gTree
     | .eq =>
       -- `c.orig` is the difference `a − b`; `c.fvar : a = b`.
       -- Bridge: `evalReal x p = a − b`. Combined with
@@ -333,7 +368,9 @@ private def buildHypothesisAevalProofsA (n : Nat) (φE : Expr)
       accEq := accEq.push aProof
       polysEq := polysEq.push gTree
   return { ineqProofs := accIneq.toList, ineqPolys := polysIneq.toList,
-           eqProofs := accEq.toList, eqPolys := polysEq.toList }
+           eqProofs := accEq.toList, eqPolys := polysEq.toList,
+           strictPosProofs := accStrict.toList,
+           strictPosPolys := polysStrict.toList }
 
 /-- Closed and strict goals carry a conclusion polynomial plus the
 original user expression it must bridge back to. -/
@@ -431,12 +468,63 @@ def closeSos (parsed : SOS.Reify.ParsedGoal) (certE : Expr)
   mv.assign final
   Tactic.replaceMainGoal []
 
+/-- Strict-product Positivstellensatz close: discharges `0 < p` via
+`sos_strict_product_sound`, where the certificate verifies the closed
+identity `−(∏ strictGs)^exponent = σ_cert((gs ++ [−p]), ps)`. Strict
+hypotheses are read from the parsed constraints (kind = `.pos`); they
+contribute *both* a downgraded `0 ≤ g` proof to the cone bridge *and* a
+strict-positive `0 < g` proof to the structural witness. -/
+def closeSosStrictProduct (parsed : SOS.Reify.ParsedGoal)
+    (certE : Expr) (exponent : Nat) :
+    TacticM Unit := Tactic.withMainContext do
+  let n := parsed.atoms.size
+  let nE := Lean.mkNatLit n
+  let mv ← Tactic.getMainGoal
+  let φE ← buildFinValExpr parsed.atoms
+  let bridged ← buildHypothesisAevalProofsA n φE parsed.constraints
+  let gsListE ← gsCMvListExpr n bridged.ineqPolys
+  let psListE ← gsCMvListExpr n bridged.eqPolys
+  let strictGsListE ← gsCMvListExpr n bridged.strictPosPolys
+  let hgsProof ← buildForallMemProof n φE bridged.ineqPolys bridged.ineqProofs
+  let hpsProof ← buildForallMemEqZeroProof n φE bridged.eqPolys bridged.eqProofs
+  let hStrictProof ← buildForallMemStrictProof n φE
+    bridged.strictPosPolys bridged.strictPosProofs
+  let p ← parsedConclusionData "sos" parsed n
+  -- Augmented inequality list `gs ++ [-p]`. The certificate's σ
+  -- subsets index into this list (with `-p` at the last position).
+  let cmvTy ← cmvType n
+  let negPE ← mkAppM ``Neg.neg #[p.cmv]
+  let nilE ← mkAppOptM ``List.nil #[some cmvTy]
+  let singletonE ← mkAppOptM ``List.cons #[some cmvTy, some negPE, some nilE]
+  let augGsListE ← mkAppM ``HAppend.hAppend #[gsListE, singletonE]
+  -- Target polynomial: `−(strictProductPoly strictGs)^exponent`.
+  let strictProdE ← mkAppOptM ``SOS.strictProductPoly #[some nE, some strictGsListE]
+  let expE := Lean.mkNatLit exponent
+  let powE ← mkAppM ``HPow.hPow #[strictProdE, expE]
+  let negPowE ← mkAppM ``Neg.neg #[powE]
+  let goalE ← mkAppOptM ``SOS.Goal.closed #[some nE, some negPowE]
+  let decProof ← buildCheckProof certE goalE augGsListE psListE
+  let hTarget ← mkAppM ``SOS.sos_strict_product_sound
+    #[p.cmv, strictGsListE, expE, gsListE, psListE, certE, decProof, φE,
+      hgsProof, hpsProof, hStrictProof]
+  let eqProof_p ← buildAtomicBridgeEq n φE p.tree p.orig
+  let pE := Lean.toExpr p.tree
+  let hPos ← mkAppOptM ``SOS.pos_orig_of_aeval
+    #[some nE, some φE, some pE, some p.orig, some eqProof_p, some hTarget]
+  let final ←
+    if p.useSubBridge then mkAppM ``lt_of_sub_pos #[hPos]
+    else pure hPos
+  mv.assign final
+  Tactic.replaceMainGoal []
+
 /-! ### Tactic surface -/
 
 syntax (name := sosTactic) "sos" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosTryTactic) "sos?" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosWitnessTactic)
   "sos_witness " term ("with" "ε" ":=" term)? : tactic
+syntax (name := sosWitnessExpTactic)
+  "sos_witness " term "with" "exponent" ":=" num : tactic
 
 /-- Build a `SOS.Certificate n` Expr from a runtime `Certificate n`,
 quoted via `SOS.Poly.decompile` so each square round-trips through
@@ -635,15 +723,50 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
     | some cert => withFoundCert cert .infeasible none
   | .strict =>
     let p ← parsedConclusionData s!"{tag} (strict)" parsed n
+    -- Path A: LP-slack `runStrict` (Harrison-free, finds a uniform ε
+    -- for non-boundary problems). Path B (fallback): strict-product
+    -- Positivstellensatz (Harrison `REAL_NONLINEAR_PROVER`), which
+    -- closes boundary-tight strict goals where no ε exists.
     match (← (SOS.Search.runStrict p.tree.toCMv gsCMv psCMv
         (maxRoundingDenom := maxDenom) (maxDepth := maxDepth)
         (basisStrategy := strategy)
         (maxSubsetCardinality := maxCard) : IO _)) with
-    | none => throwError "{tag}: search failed to find a strict-positivity certificate"
     | some res =>
       let εE := Lean.toExpr res.ε
       let hεProof ← buildStrictHεProof εE
       withFoundCert res.cert (.strict εE hεProof) (some res.ε)
+    | none =>
+      -- Strict-hypothesis indices within `gsCMv` (which preserves the
+      -- order of non-equality constraints from `parsed.constraints`).
+      let strictIdxs : List Nat := Id.run do
+        let mut idxs : Array Nat := #[]
+        let mut ineqIdx : Nat := 0
+        for c in parsed.constraints do
+          match c.kind with
+          | .pos =>
+            idxs := idxs.push ineqIdx
+            ineqIdx := ineqIdx + 1
+          | .nonneg | .nonpos =>
+            ineqIdx := ineqIdx + 1
+          | .eq => pure ()
+        return idxs.toList
+      match (← (SOS.Search.runStrictProduct p.tree.toCMv gsCMv strictIdxs psCMv
+          (maxRoundingDenom := maxDenom) (maxDepth := maxDepth)
+          (basisStrategy := strategy)
+          (maxSubsetCardinality := maxCard) : IO _)) with
+      | none =>
+        throwError "{tag}: search failed to find a strict-positivity certificate"
+      | some res =>
+        let decompiled := decompileCertificate res.cert
+        if let some tk := suggest? then
+          let certText := formatDecompiledCertificate decompiled
+          let suggestion :=
+            s!"sos_witness {certText} with exponent := {res.exponent}"
+          let sugg : Lean.Meta.Tactic.TryThis.Suggestion :=
+            { suggestion := .string suggestion }
+          Lean.Meta.Tactic.TryThis.addSuggestion tk sugg
+        let certE ← certExprOfDecompiled n decompiled
+        closeSosStrictProduct parsed certE res.exponent
 
 /-- Detect whether the *original* goal (before any lift / refute step)
 has a ℕ/ℤ ≤/</= conclusion at its head after stripping leading binders.
@@ -874,9 +997,30 @@ private def runSosWitness (cert : Term)
   | _, some _ =>
     throwError "sos_witness: `with ε := …` is only valid on strict-positivity goals"
 
+/-- Shared body of `sos_witness <cert> with exponent := <n>`, the
+witness form for strict-product Positivstellensatz certificates
+(issue #46). Elaborates the certificate against the parsed goal,
+verifies the parsed shape is `.strict`, and dispatches to
+`closeSosStrictProduct`. -/
+private def runSosWitnessStrictProduct (cert : Term) (expN : Nat) :
+    TacticM Unit := do
+  let some parsed ← SOS.Reify.parseGoalAtomic |
+    throwError "sos_witness: goal not in supported fragment"
+  unless parsed.shape matches .strict do
+    throwError
+      "sos_witness: `with exponent := <nat>` is only valid on strict-positivity goals"
+  let n := parsed.atoms.size
+  let certTy ← mkAppOptM ``SOS.Certificate #[some (Lean.mkNatLit n)]
+  let certE ← Term.elabTermEnsuringType cert certTy
+  Term.synthesizeSyntheticMVarsNoPostponing
+  let certE ← instantiateMVars certE
+  closeSosStrictProduct parsed certE expN
+
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => runSosWitness cert none
   | `(tactic| sos_witness $cert:term with ε := $eps:term) =>
       runSosWitness cert (some eps)
+  | `(tactic| sos_witness $cert:term with exponent := $expN:num) =>
+      runSosWitnessStrictProduct cert expN.getNat
 
 end SOS
