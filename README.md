@@ -11,8 +11,13 @@ arithmetic, in Lean 4. Based on the design from
 The `by sos` tactic closes nonlinear-real-arithmetic goals end-to-end:
 reify the goal, encode an SDP, call CSDP, round the float Gram matrix
 to rationals, decompose via LDLᵀ + Lagrange four-square, and dispatch
-the matching verifier-soundness lemma. A representative sample from
-[`SOSTest/Examples.lean`](SOSTest/Examples.lean):
+the matching verifier-soundness lemma.
+
+## Examples
+
+A curated version of this section lives in
+[`SOSTest/Showcase.lean`](SOSTest/Showcase.lean), so `lake test`
+checks that these public examples continue to elaborate.
 
 ```lean
 import SOS
@@ -40,6 +45,16 @@ example (x y : ℝ) (_hx : 0 ≤ x) (_hy : 0 ≤ y) :
 
 -- Strict-inequality hypothesis (promoted to `0 ≤ x` via `le_of_lt`)
 example (x : ℝ) (_h : 0 < x) : 0 ≤ x^3 + x := by sos
+
+-- Equality constraint: discriminant of a real-rooted quadratic
+example (a b c x : ℝ) (_h : a*x^2 + b*x + c = 0) :
+    0 ≤ b^2 - 4*a*c := by sos
+
+-- Discrete goal, lifted/refuted through ℝ
+example : ∀ n : ℕ, n ≤ n * n := by sos
+
+-- Euclidean division over ℕ
+example : ∀ a b : ℕ, b ≠ 0 → a = b * (a / b) + a % b := by sos
 ```
 
 `by sos?` reports the witness it found as a `Try this:` suggestion

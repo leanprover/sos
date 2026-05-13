@@ -36,6 +36,11 @@ jobs:
       - name: Fetch Mathlib cache
         run: lake exe cache get
 
+      - name: Check CSDP native dependencies
+        run: |
+          cd .lake/packages/leanCsdp
+          lake script run checkNativeDeps
+
       - name: Build SOS
         run: lake build SOS
 
