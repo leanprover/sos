@@ -37,7 +37,9 @@ closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
 -/
 import SOS.Certificate
 import SOS.LDL
+import SOS.RatLinAlg
 import SOS.RatSimplex
+import SOS.Symmetry
 import LeanCsdp
 
 namespace SOS.Search
@@ -171,6 +173,33 @@ def newtonBasis (target : CMvPolynomial n ℚ) (deg : Nat) :
     Array (CMvMonomial n) :=
   if target.monomials.isEmpty then #[]
   else (monomialsUpTo n deg).filter (fun m => isInHalfNewton target m)
+
+/-- Harrison's `newton_polytope` basis order for pure SOS search. It
+enumerates the rectangular per-variable half-degree box, filters by
+half-Newton membership, and reverses the result so high-degree terms
+come first and the constant monomial is last. The order matters for the
+Harrison-style sparse eliminator used by the symmetry-reduced path. -/
+private def harrisonNewtonBasis (target : CMvPolynomial n ℚ) :
+    Array (CMvMonomial n) := Id.run do
+  if target.monomials.isEmpty then return #[]
+  let mut bounds : Array Nat := Array.replicate n 0
+  for m in target.monomials do
+    for i in [0:n] do
+      let b := ((m[i]! + 1) / 2)
+      if bounds[i]! < b then
+        bounds := bounds.set! i b
+  let rec go (fuel i : Nat) (acc : Array Nat) :
+      Array (CMvMonomial n) :=
+    if fuel = 0 then
+      #[Vector.ofFn fun (j : Fin n) => acc[j.val]?.getD 0]
+    else if i = n then
+      #[Vector.ofFn fun (j : Fin n) => acc[j.val]?.getD 0]
+    else Id.run do
+      let mut out : Array (CMvMonomial n) := #[]
+      for e in [0:(bounds[i]?.getD 0) + 1] do
+        out := out ++ go (fuel - 1) (i + 1) (acc.push e)
+      return out
+  (go (n + 1) 0 #[]).filter (fun m => isInHalfNewton target m) |>.reverse
 
 /-- Basis-selection strategy for the σ₀ block.
 
@@ -785,6 +814,265 @@ def tryDenominator (gs : List (CMvPolynomial n ℚ))
   if cert.checks goal gs ps then return some cert
   return none
 
+/-! ### Symmetry-reduced pure SOS path -/
+
+/-- Number of upper-triangle variables in an `N × N` symmetric matrix. -/
+@[inline] private def upperTriCount (N : Nat) : Nat := N * (N + 1) / 2
+
+/-- Dense index for an upper-triangle pair `(i,j)`, normalising the pair
+first. The order is row-major over `i ≤ j`: `(0,0),(0,1),...,(1,1),...`. -/
+private def upperTriIndex (N i j : Nat) : Nat :=
+  let a := if i ≤ j then i else j
+  let b := if i ≤ j then j else i
+  a * N - (a * (a - 1)) / 2 + (b - a)
+
+/-- Inverse of `upperTriIndex`, by bounded search. The matrices involved
+in SOS search are small enough that this is cheaper than maintaining a
+second encoding throughout the exact elimination code. -/
+private def upperTriPair (N idx : Nat) : Nat × Nat := Id.run do
+  let mut k := 0
+  for i in [0:N] do
+    for j in [i:N] do
+      if k = idx then return (i, j)
+      k := k + 1
+  return (0, 0)
+
+/-- Add `delta` to an augmented dense row at variable column `idx`. -/
+private def addVarCoeff (row : Array ℚ) (idx : Nat) (delta : ℚ) :
+    Array ℚ :=
+  row.set! idx (row[idx]! + delta)
+
+/-- Build the exact equality system for a pure SOS Gram matrix:
+coefficient-matching equations plus σ₀ Gram symmetry equations. -/
+private def symmetricPureEquations (target : CMvPolynomial n ℚ)
+    (block : BlockSpec n) (symmetries : Array (Array Nat)) :
+    Option (Array (Array ℚ) × Array (CMvMonomial n)) := Id.run do
+  let N := block.size
+  let numVars := upperTriCount N
+  let mut monos : Array (CMvMonomial n) := #[]
+  let mut monoIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
+  for m in target.monomials do
+    if !monoIndex.contains m then
+      monoIndex := monoIndex.insert m monos.size
+      monos := monos.push m
+  let mut cached : Array (Nat × Nat × Array (CMvMonomial n × ℚ)) := #[]
+  for i in [0:N] do
+    for j in [i:N] do
+      let prod := blockProduct block i j
+      let mut support : Array (CMvMonomial n × ℚ) := #[]
+      for m in prod.monomials do
+        let c := prod.coeff m
+        if c ≠ 0 then
+          support := support.push (m, c)
+          if !monoIndex.contains m then
+            monoIndex := monoIndex.insert m monos.size
+            monos := monos.push m
+      cached := cached.push (i, j, support)
+  let mut rows : Array (Array ℚ) := #[]
+  for m in monos do
+    let mut row : Array ℚ := Array.replicate (numVars + 1) 0
+    for (i, j, support) in cached do
+      for (m', c) in support do
+        if m' = m then
+          let factor : ℚ := if i = j then 1 else 2
+          let idx := upperTriIndex N i j
+          row := addVarCoeff row idx (factor * c)
+    row := row.set! numVars (target.coeff m)
+    rows := rows.push row
+  let mut basisIndex : Std.TreeMap (CMvMonomial n) Nat compare := {}
+  for i in [0:N] do
+    basisIndex := basisIndex.insert block.basis[i]! i
+  let mut basisPerms : Array (Array Nat) := #[]
+  for π in symmetries do
+    let some p := SOS.Symmetry.basisPermutation π block.basis basisIndex
+      | return none
+    basisPerms := basisPerms.push p
+  for ((i, j), (ri, rj)) in SOS.Symmetry.gramSymmetryConstraints N basisPerms do
+    let mut row : Array ℚ := Array.replicate (numVars + 1) 0
+    row := addVarCoeff row (upperTriIndex N i j) 1
+    row := addVarCoeff row (upperTriIndex N ri rj) (-1)
+    rows := rows.push row
+  return some (rows, monos)
+
+/-- Expressions for all Gram entries after exact elimination.
+`constant[v]` and `coeffs[v][k]` describe upper-triangle variable `v` as
+`constant[v] + Σ_k coeffs[v][k] * q_k`, where `q_k` ranges over the
+free columns. -/
+private structure GramParam where
+  freeCols : Array Nat
+  constant : Array ℚ
+  coeffs   : Array (Array ℚ)
+
+/-- Solve the equality system over `ℚ` and express every Gram entry in
+terms of the remaining free orbit parameters. -/
+private def gramParam (numVars : Nat) (rows : Array (Array ℚ)) :
+    Option GramParam := Id.run do
+  let rows := rows.map fun row => row.set! numVars (-(row[numVars]!))
+  let some E := SOS.RatLinAlg.eliminateAll numVars rows | return none
+  let freeCols := E.freeCols
+  let mut freeIndex : Std.TreeMap Nat Nat compare := {}
+  for k in [0:freeCols.size] do
+    freeIndex := freeIndex.insert freeCols[k]! k
+  let mut constants : Array ℚ := Array.replicate numVars 0
+  let mut coeffs : Array (Array ℚ) :=
+    Array.replicate numVars (Array.replicate freeCols.size 0)
+  for k in [0:freeCols.size] do
+    let v := freeCols[k]!
+    let row := (coeffs[v]!).set! k 1
+    coeffs := coeffs.set! v row
+  for (pivot, row) in E.assignments do
+    constants := constants.set! pivot row[numVars]!
+    let mut cs : Array ℚ := Array.replicate freeCols.size 0
+    for f in freeCols do
+      if let some k := freeIndex[f]? then
+        cs := cs.set! k row[f]!
+    coeffs := coeffs.set! pivot cs
+  return some { freeCols, constant := constants, coeffs }
+
+/-- Build the constant Gram matrix and one coefficient matrix per free
+parameter. Matrices are stored in upper-triangle flat order. -/
+private def gramMats (N : Nat) (param : GramParam) :
+    Array (Array ℚ) := Id.run do
+  let numVars := upperTriCount N
+  let mut mats : Array (Array ℚ) :=
+    Array.replicate (param.freeCols.size + 1) (Array.replicate numVars 0)
+  for v in [0:numVars] do
+    let c := param.constant[v]!
+    if c ≠ 0 then
+      mats := mats.set! 0 ((mats[0]!).set! v c)
+    let cs := param.coeffs[v]!
+    for k in [0:param.freeCols.size] do
+      let a := cs[k]!
+      if a ≠ 0 then
+        mats := mats.set! (k + 1) ((mats[k + 1]!).set! v a)
+  return mats
+
+private def upperTriTrace (N : Nat) (M : Array ℚ) : ℚ := Id.run do
+  let mut t : ℚ := 0
+  for i in [0:N] do
+    t := t + M[upperTriIndex N i i]!
+  return t
+
+/-- CSDP encoding of the reduced dual:
+`mats[0] + Σ qᵢ mats[i+1] ⪰ 0`. CSDP returns the reduced vector as the
+dual variable `y`. The objective is a trace extremum in reduced
+coordinates; currently this uses CSDP's dual minimisation direction,
+which is enough to expose rational boundary points in the covered
+`Z₂×Z₂` case. -/
+private def buildReducedProblem (N : Nat) (mats : Array (Array ℚ)) :
+    LeanCsdp.Problem :=
+  let freeCount := mats.size - 1
+  let aTriples : Array LeanCsdp.ConstraintTriple := Id.run do
+    let mut acc : Array LeanCsdp.ConstraintTriple := #[]
+    for k in [0:freeCount] do
+      let M := mats[k + 1]!
+      for v in [0:M.size] do
+        let c := M[v]!
+        if c ≠ 0 then
+          let (i, j) := upperTriPair N v
+          acc := acc.push
+            { constraint := UInt32.ofNat (k + 1)
+              block := 1
+              row := UInt32.ofNat (i + 1)
+              col := UInt32.ofNat (j + 1)
+              value := ratToFloat c }
+    return acc
+  let cTriples : Array LeanCsdp.Triple := Id.run do
+    let mut acc : Array LeanCsdp.Triple := #[]
+    let M0 := mats[0]!
+    for v in [0:M0.size] do
+      let c := M0[v]!
+      if c ≠ 0 then
+        let (i, j) := upperTriPair N v
+        acc := acc.push
+          { block := 1
+            row := UInt32.ofNat (i + 1)
+            col := UInt32.ofNat (j + 1)
+            value := ratToFloat (-c) }
+    return acc
+  let b : Array Float := Id.run do
+    let mut out : Array Float := #[]
+    for k in [0:freeCount] do
+      out := out.push (ratToFloat (upperTriTrace N (mats[k + 1]!)))
+    return out
+  { blockSizes := #[Int32.ofNat N], b, c := cTriples, a := aTriples,
+    constantOffset := 0.0 }
+
+/-- Reconstruct a rational Gram matrix from a rounded reduced vector. -/
+private def reconstructReducedGram (N : Nat) (mats : Array (Array ℚ))
+    (vec : Array ℚ) : Option (Array ℚ) := Id.run do
+  if mats.isEmpty ∨ vec.size + 1 ≠ mats.size then return none
+  let numVars := upperTriCount N
+  let mut Q := mats[0]!
+  if Q.size ≠ numVars then return none
+  for k in [0:vec.size] do
+    let M := mats[k + 1]!
+    if M.size ≠ numVars then return none
+    for v in [0:numVars] do
+      Q := Q.set! v (Q[v]! + vec[k]! * M[v]!)
+  return some Q
+
+/-- Try one denominator in the reduced free-parameter space. -/
+private def tryReducedDenominator (block : BlockSpec n) (mats : Array (Array ℚ))
+    (raw : FloatArray) (denom : ℚ) (goal : Goal n) :
+    Option (Certificate n) := Id.run do
+  let mut vec : Array ℚ := #[]
+  for i in [0:raw.size] do
+    vec := vec.push (niceRound denom (raw.get! i))
+  let some Q := reconstructReducedGram block.size mats vec | return none
+  let some sigma0Squares :=
+    LDL.reconstruct block.size Q (basisAsPolys block.basis)
+    | return none
+  let cert : Certificate n :=
+    { sigma0 := { squares := sigma0Squares }, sigmas := [], eqCofs := [] }
+  if cert.checks goal [] [] then return some cert
+  return none
+
+/-- Pure SOS search through the Harrison-style symmetry reduction:
+eliminate coefficient and Gram-symmetry equalities over `ℚ`, solve CSDP
+in the free orbit parameters, and round that small vector. -/
+private def tryReducedPureSdp (target : CMvPolynomial n ℚ) (goal : Goal n)
+    (useTraceCost : Bool) (extraDeg : Nat) (_strategy : BasisStrategy)
+    (maxRoundingDenom : Nat) (symmetries : Array (Array Nat)) :
+    IO (Option (Certificate n)) := do
+  if !useTraceCost then
+    return none
+  if extraDeg ≠ 0 then
+    return none
+  let block : BlockSpec n :=
+    { basis := harrisonNewtonBasis target, multiplier := CMvPolynomial.C 1 }
+  if block.size = 0 then
+    if target = 0 then
+      return some { sigma0 := { squares := [] }, sigmas := [], eqCofs := [] }
+    else
+      return none
+  let some (eqs, _monos) := symmetricPureEquations target block symmetries
+    | return none
+  let numVars := upperTriCount block.size
+  let some param := gramParam numVars eqs | return none
+  if param.freeCols.isEmpty then
+    let mats := gramMats block.size param
+    let some Q := reconstructReducedGram block.size mats #[] | return none
+    let some sigma0Squares :=
+      LDL.reconstruct block.size Q (basisAsPolys block.basis)
+      | return none
+    let cert : Certificate n :=
+      { sigma0 := { squares := sigma0Squares }, sigmas := [], eqCofs := [] }
+    if cert.checks goal [] [] then return some cert else return none
+  let mats := gramMats block.size param
+  let problem := buildReducedProblem block.size mats
+  let sol := LeanCsdp.solve problem
+  if sol.ret ∉ [0, 3] then
+    return none
+  let targetDenom : ℚ := (polyDenom target : ℚ)
+  let denomCandidates : List ℚ := targetDenom :: niceDenominators
+  let maxDenomQ : ℚ := (maxRoundingDenom : ℚ)
+  for d in denomCandidates do
+    if d ≤ maxDenomQ then
+      if let some cert := tryReducedDenominator block mats sol.y d goal then
+        return some cert
+  return none
+
 /-- Try a single SDP encoding (one choice of `useTraceCost` and one
 `extraDeg` relaxation level) and the denominator schedule. Candidates
 are filtered against `maxRoundingDenom` (default `2^20`); raise it via
@@ -881,6 +1169,8 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
   let σ₀Deg := Nat.max (Nat.max targetDeg maxGDeg) maxPDeg
   let supportSize := target.monomials.length
   let dropConstant := target.coeff (zeroMono n) = 0
+  let symmetries := SOS.Symmetry.detectSymmetries target gs ps
+  let useReducedPure := gs.isEmpty ∧ ps.isEmpty ∧ symmetries.size > 1
   let pruneAllowed : Bool := match goal with
     | .infeasible => false
     | _           => basisStrategy ≠ .dense
@@ -906,9 +1196,14 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
           then [basisStrategy, .dense] else [.dense]
     for strat in basisStrategies do
       for useTraceCost in costStrategies do
-        if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
-            strat maxRoundingDenom then
-          return some cert
+        if useReducedPure then
+          if let some cert ← tryReducedPureSdp target goal useTraceCost extraDeg
+              strat maxRoundingDenom symmetries then
+            return some cert
+        else
+          if let some cert ← tryOneSdp target gs ps goal useTraceCost extraDeg
+              strat maxRoundingDenom then
+            return some cert
   return none
 
 /-! ### Strict positivity via LP-slack maximisation

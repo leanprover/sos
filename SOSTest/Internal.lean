@@ -29,6 +29,30 @@ The denser schedule is `[1..63]` followed by alternating `2^k`,
 #guard SOS.Search.niceDenominators.contains (45 : ℚ)
 #guard SOS.Search.niceDenominators.contains (96 : ℚ)
 
+/-! ### Exact rational row reduction -/
+
+#guard
+  let R := SOS.RatLinAlg.rref 2
+    #[#[(1 : ℚ), 1, 3],
+      #[(2 : ℚ), -1, 0]]
+  R.pivots = #[0, 1] ∧ R.freeCols = #[] ∧
+    R.rows = #[#[(1 : ℚ), 0, 1], #[(0 : ℚ), 1, 2]]
+
+#guard
+  let R := SOS.RatLinAlg.rref 3
+    #[#[(1 : ℚ), 1, 0, 0]]
+  R.pivots = #[0] ∧ R.freeCols = #[1, 2]
+
+#guard
+  match SOS.RatLinAlg.eliminateAll 2
+      #[#[(1 : ℚ), 1, -3],
+        #[(2 : ℚ), -1, 0]] with
+  | some E =>
+      E.freeCols = #[] ∧
+        E.assignments.map (fun (v, row) => (v, row)) =
+          #[(0, #[(0 : ℚ), 0, 1]), (1, #[(0 : ℚ), 0, 2])]
+  | none => false
+
 /-! ### `monomialsUpTo` -/
 
 #guard (SOS.Search.monomialsUpTo 2 2).size = 6
