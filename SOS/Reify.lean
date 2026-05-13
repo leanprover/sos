@@ -186,12 +186,19 @@ leave the local context polluted with introduced binders.
 
 /-- One reified constraint hypothesis: the untyped polynomial AST,
 the original ℝ-valued side (the `b` in `0 ≤ b`, the `a` in `a ≤ 0`,
-the `b` in `0 < b`), the kind, and the hypothesis FVar. -/
+the `b` in `0 < b`), the kind, and the hypothesis FVar.
+
+For general `a ≤ b` / `a < b` hypotheses (neither side a `0` literal),
+`orig` is the difference `b − a` and `useSubBridge` is `true`,
+signalling the elaborator to wrap the FVar with `sub_nonneg_of_le` /
+`sub_pos_of_lt` so it lands in the canonical `0 ≤ orig` / `0 < orig`
+form expected by the bridge lemmas. -/
 structure ConstraintInfo where
   raw  : SOS.Poly.Raw
   orig : Lean.Expr
   kind : ConstraintKind
   fvar : FVarId
+  useSubBridge : Bool := false
 
 /-- Reified conclusion: untyped polynomial AST plus the original
 ℝ-valued side of the user's `0 ≤ p` / `0 < p` goal. Bundled together
@@ -259,29 +266,43 @@ private def tryReify (e : Expr) (atoms : Array Expr) :
     return none
 
 /-- Try to recognise a hypothesis Expr as a constraint of one of the
-supported shapes (`0 ≤ b`, `a ≤ 0`, `0 < b`). Returns the
-ConstraintKind, the reified polynomial, the original ℝ-typed Expr,
-and the updated atom array. -/
+supported shapes (`0 ≤ b`, `a ≤ 0`, `0 < b`, general `a ≤ b` /
+`a < b`, ℝ-valued `a = b`). Returns the ConstraintKind, the reified
+polynomial, the original ℝ-typed Expr, a `useSubBridge` flag (true
+iff the hypothesis is general `a ≤ b` / `a < b` and the elaborator
+must wrap the FVar with `sub_nonneg.mpr` / `sub_pos.mpr` to land in
+the canonical `0 ≤ orig` / `0 < orig` form), and the updated atom
+array. -/
 def recogniseConstraint (h : Expr) (atoms : Array Expr) :
     Tactic.TacticM (Option
-      (ConstraintKind × SOS.Poly.Raw × Lean.Expr × Array Expr)) := do
+      (ConstraintKind × SOS.Poly.Raw × Lean.Expr × Bool × Array Expr)) := do
   let h ← whnfR h
   match_expr h with
   | LE.le _ _ a b =>
+    -- Fast path: `0 ≤ b` and `a ≤ 0` with a literal `0` on the named
+    -- side avoid a redundant subtraction.
     if let some r ← ratLit? a then
       if r = 0 then
         let some (raw, atoms') ← tryReify b atoms | return none
-        return some (.nonneg, raw, b, atoms')
+        return some (.nonneg, raw, b, false, atoms')
     if let some r ← ratLit? b then
       if r = 0 then
         let some (raw, atoms') ← tryReify a atoms | return none
-        return some (.nonpos, .neg raw, a, atoms')
-    return none
+        return some (.nonpos, .neg raw, a, false, atoms')
+    -- General `a ≤ b`: reify `b − a` and use the sub-bridge so the
+    -- canonical fact is `0 ≤ b − a`.
+    let diff ← Meta.mkAppM ``HSub.hSub #[b, a]
+    let some (raw, atoms') ← tryReify diff atoms | return none
+    return some (.nonneg, raw, diff, true, atoms')
   | LT.lt _ _ a b =>
-    let some r ← ratLit? a | return none
-    unless r = 0 do return none
-    let some (raw, atoms') ← tryReify b atoms | return none
-    return some (.pos, raw, b, atoms')
+    if let some r ← ratLit? a then
+      if r = 0 then
+        let some (raw, atoms') ← tryReify b atoms | return none
+        return some (.pos, raw, b, false, atoms')
+    -- General `a < b`: reify `b − a` and use the sub-bridge.
+    let diff ← Meta.mkAppM ``HSub.hSub #[b, a]
+    let some (raw, atoms') ← tryReify diff atoms | return none
+    return some (.pos, raw, diff, true, atoms')
   | Eq α a b =>
     -- Only ℝ-valued equalities count as constraints. Equalities at
     -- other types are not in the supported fragment.
@@ -292,7 +313,7 @@ def recogniseConstraint (h : Expr) (atoms : Array Expr) :
     -- `h : a = b` (`sub_eq_zero_of_eq`) to get `a − b = 0`.
     let abDiff ← Meta.mkAppM ``HSub.hSub #[a, b]
     let some (raw, atoms') ← tryReify abDiff atoms | return none
-    return some (.eq, raw, abDiff, atoms')
+    return some (.eq, raw, abDiff, false, atoms')
   | _ => return none
 
 partial def parseGoalAtomicAux
@@ -375,14 +396,14 @@ where
       Tactic.TacticM (Option ParsedGoal) := do
     let .forallE _ hypType body _ := goalType | return none
     unless !body.hasLooseBVars do return none
-    let some (kind, rawG, origG, atoms') ← recogniseConstraint hypType atoms |
-      return none
+    let some (kind, rawG, origG, useSubBridge, atoms') ←
+      recogniseConstraint hypType atoms | return none
     let st ← Tactic.saveState
     let mv ← Tactic.getMainGoal
     let (hFV, mv') ← mv.intro `h
     Tactic.replaceMainGoal [mv']
     let info : ConstraintInfo :=
-      { raw := rawG, orig := origG, kind, fvar := hFV }
+      { raw := rawG, orig := origG, kind, fvar := hFV, useSubBridge }
     match ← parseGoalAtomicAux atoms' (constraints.push info) with
     | some out => return some out
     | none => st.restore; return none
@@ -402,10 +423,11 @@ def mergeLocalCtxConstraints (pg : ParsedGoal) :
     if known.contains ldecl.fvarId then continue
     let ty ← Lean.Meta.inferType ldecl.type
     unless ty.isProp do continue
-    if let some (kind, rawG, origG, atoms') ← recogniseConstraint ldecl.type atoms then
+    if let some (kind, rawG, origG, useSubBridge, atoms') ←
+        recogniseConstraint ldecl.type atoms then
       atoms := atoms'
       constraints := constraints.push
-        { raw := rawG, orig := origG, kind, fvar := ldecl.fvarId }
+        { raw := rawG, orig := origG, kind, fvar := ldecl.fvarId, useSubBridge }
   return { pg with atoms, constraints }
 
 /-- Top-level entry. Intros all parseable ∀-binders and constraint
