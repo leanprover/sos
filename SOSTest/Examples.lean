@@ -225,6 +225,19 @@ example (x : ℝ) : 0 < x^2 + 1 := by sos?
 example (x : ℝ) : 0 < x^2 + 1 := by
   sos_witness { sigmas := [([], { squares := [CMvPolynomial.X 0] })] } with ε := (1 : ℚ)
 
+-- For boundary-tight strict goals (issue #46), `sos?` emits the
+-- replayable `sos_witness <cert> with exponent := <n>` form. The
+-- inline cert verifies `−pol^n` against the augmented inequality
+-- list `gs ++ [−p]`. The exact CSDP-found cert isn't a stable
+-- string (Gram entries depend on the SDP solver path), so we only
+-- check that the hand-rolled minimal witness replays. The minimal
+-- cert here is `σ_{[1]} = 1`, contributing `1 · (−x²) = −x²` against
+-- `gs ++ [-p] = [x, -x²]`.
+example (x : ℝ) (_h : 0 < x) : 0 < x^2 := by
+  sos_witness
+    { sigmas := [([1], { squares := [CMvPolynomial.C (1 : ℚ)] })] }
+    with exponent := 2
+
 -- For equality goals the suggestion includes `eqCofs := …`.
 /-- info: Try this:
   [apply] sos_witness { sigmas := [([], { squares := [] })], eqCofs := [CMvPolynomial.C (1 : ℚ)] }

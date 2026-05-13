@@ -523,6 +523,8 @@ syntax (name := sosTactic) "sos" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosTryTactic) "sos?" Lean.Parser.Tactic.optConfig : tactic
 syntax (name := sosWitnessTactic)
   "sos_witness " term ("with" "ε" ":=" term)? : tactic
+syntax (name := sosWitnessExpTactic)
+  "sos_witness " term "with" "exponent" ":=" num : tactic
 
 /-- Build a `SOS.Certificate n` Expr from a runtime `Certificate n`,
 quoted via `SOS.Poly.decompile` so each square round-trips through
@@ -755,19 +757,14 @@ private def runSosTactic (parsed : SOS.Reify.ParsedGoal) (cfg : Config)
       | none =>
         throwError "{tag}: search failed to find a strict-positivity certificate"
       | some res =>
-        -- Skip the `sos?` suggestion on this path: the strict-product
-        -- certificate would need to carry the `exponent` for
-        -- `sos_witness` to replay it, but the current witness syntax
-        -- only accepts the `ε`-form for strict goals. A clickable
-        -- suggestion that fails on replay is worse than no suggestion;
-        -- emit a hint instead and leave proper witness syntax to a
-        -- follow-up. The proof still closes through `closeSosStrictProduct`.
-        if let some tk := suggest? then
-          let sugg : Lean.Meta.Tactic.TryThis.Suggestion :=
-            { suggestion := .string
-                "sos -- strict-product cert (no inline `sos_witness` replay yet)" }
-          Lean.Meta.Tactic.TryThis.addSuggestion tk sugg
         let decompiled := decompileCertificate res.cert
+        if let some tk := suggest? then
+          let certText := formatDecompiledCertificate decompiled
+          let suggestion :=
+            s!"sos_witness {certText} with exponent := {res.exponent}"
+          let sugg : Lean.Meta.Tactic.TryThis.Suggestion :=
+            { suggestion := .string suggestion }
+          Lean.Meta.Tactic.TryThis.addSuggestion tk sugg
         let certE ← certExprOfDecompiled n decompiled
         closeSosStrictProduct parsed certE res.exponent
 
@@ -1000,9 +997,30 @@ private def runSosWitness (cert : Term)
   | _, some _ =>
     throwError "sos_witness: `with ε := …` is only valid on strict-positivity goals"
 
+/-- Shared body of `sos_witness <cert> with exponent := <n>`, the
+witness form for strict-product Positivstellensatz certificates
+(issue #46). Elaborates the certificate against the parsed goal,
+verifies the parsed shape is `.strict`, and dispatches to
+`closeSosStrictProduct`. -/
+private def runSosWitnessStrictProduct (cert : Term) (expN : Nat) :
+    TacticM Unit := do
+  let some parsed ← SOS.Reify.parseGoalAtomic |
+    throwError "sos_witness: goal not in supported fragment"
+  unless parsed.shape matches .strict do
+    throwError
+      "sos_witness: `with exponent := <nat>` is only valid on strict-positivity goals"
+  let n := parsed.atoms.size
+  let certTy ← mkAppOptM ``SOS.Certificate #[some (Lean.mkNatLit n)]
+  let certE ← Term.elabTermEnsuringType cert certTy
+  Term.synthesizeSyntheticMVarsNoPostponing
+  let certE ← instantiateMVars certE
+  closeSosStrictProduct parsed certE expN
+
 elab_rules : tactic
   | `(tactic| sos_witness $cert:term) => runSosWitness cert none
   | `(tactic| sos_witness $cert:term with ε := $eps:term) =>
       runSosWitness cert (some eps)
+  | `(tactic| sos_witness $cert:term with exponent := $expN:num) =>
+      runSosWitnessStrictProduct cert expN.getNat
 
 end SOS
