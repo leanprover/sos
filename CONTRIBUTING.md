@@ -11,7 +11,7 @@ lake exe cache get
 lake test
 ```
 
-`lake test` is the primary check. It builds `SOSTest`, including examples that call CSDP through the `lean-csdp` FFI, so running individual test files with `lake env lean` is not equivalent for `by sos` examples.
+`lake test` is the primary check. It builds `SOSTest`, including examples that call CSDP through the `csdp-ffi` FFI, so running individual test files with `lake env lean` is not equivalent for `by sos` examples.
 
 ## Pull Requests
 
