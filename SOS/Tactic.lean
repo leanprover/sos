@@ -31,9 +31,9 @@ open Lean Elab Tactic Meta
   depth-1 retry unlocks the discriminant identity among others. Raise
   per-call for hard targets.
 * `maxRoundingDenom` — upper cap on rounding-denominator candidates
-  filtered against `SOS.Search.niceDenominators` (which itself tops out
-  at `2^20`). Raise for targets whose `polyDenom` exceeds the cap;
-  lower to fail faster on goals you know won't round cleanly.
+  filtered against `SOS.Search.niceDenominators` (which itself tops
+  out at `2^66`). Lower to fail faster on goals you know won't round
+  cleanly.
 * `basisStrategy` — σ₀ basis pruning. `.newton` (default) uses
   Reznick's half-Newton-polytope test via an exact-rational simplex;
   `.dense` disables pruning entirely. A `.dense` fallback runs at
@@ -42,10 +42,9 @@ open Lean Elab Tactic Meta
 structure Config where
   /-- Iterative-deepening cap (see field docs above). -/
   maxDepth : Nat := 1
-  /-- Upper cap on rounding-denominator candidates. Raised to `2^24`
-  to give the preordering encoding (issue #38) room when product blocks
-  push the rounding pressure beyond `2^20`. -/
-  maxRoundingDenom : Nat := 16777216
+  /-- Upper cap on rounding-denominator candidates. Default `2^66`
+  matches Harrison's HOL Light. -/
+  maxRoundingDenom : Nat := 73786976294838206464
   /-- σ₀-basis pruning strategy. See field docs above. -/
   basisStrategy : SOS.Search.BasisStrategy := .newton
   /-- Internal performance knob for the constraint-product monoid (Schmüdgen

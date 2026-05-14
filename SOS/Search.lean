@@ -631,28 +631,22 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
 
 /-! ### Denominator schedule for rational rounding -/
 
-/-- Schedule of denominators tried by the rational rounder, lifted from
-`sos.ml`'s `find_rounding`: `[1..31]` followed by `2^k` for `k = 5..24`.
+/-- Schedule of denominators tried by the rational rounder, lifted
+directly from `sos.ml`'s `find_rounding`: `[1..31]` followed by `2^k`
+for `k = 5..66`.
 
 Harrison reports that "small ints first, then doubling" works
 empirically better than a strict doubling schedule.
 
-Harrison's HOL Light caps at `2^66`; we cap at `2^24`. Beyond that
-range, CSDP rounding noise produces tiny positive `LDL` pivots whose
-`fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
-practical wall time. The `maxRoundingDenom` field of `SOS.Config` (see
-`SOS/Tactic.lean`) filters the *full* candidate list — schedule entries,
-`polyDenom target`, constraint denoms, and cross denoms — against the
-cap. Targets needing a strictly larger denom fall through to
-`sos_witness <hand-cert>`.
-
-Issue #38 extended the upper end past `2^20` to give the Schmüdgen
-preordering room for product-block Grams whose denominator grows with
-subset cardinality. -/
+The `maxRoundingDenom` field of `SOS.Config` (see `SOS/Tactic.lean`)
+filters the *full* candidate list — schedule entries, `polyDenom
+target`, constraint denoms, and cross denoms — against the cap.
+Targets needing a strictly larger denom fall through to
+`sos_witness <hand-cert>`. -/
 def niceDenominators : List ℚ :=
   let smalls : List ℚ := (List.range 31).map (fun i => (i + 1 : ℚ))
   let bigs : List ℚ :=
-    (List.range 20).map (fun i => (2 ^ (i + 5) : ℚ))
+    (List.range 62).map (fun i => (2 ^ (i + 5) : ℚ))
   smalls ++ bigs
 
 /-- Round a single float to the nearest rational at denominator `d`,
