@@ -218,8 +218,26 @@ codes 1/5 on these specific problems, so a numerical regulariser is
 not by itself sufficient — the symbolic elimination is the right
 solution.
 
+-/
+
+/-! ### Shared DIV/MOD quotient and remainder atoms (issue #67) -/
+
+set_option linter.unusedTactic false in
+example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b ≤ a := by
+  intro a b hb
+  run_tac do
+    let st ← Lean.Elab.Tactic.saveState
+    SOS.Lift.refuteToReal
+    let some parsed ← SOS.Reify.parseGoalAtomic |
+      throwError "issue #67 regression: refuted DIV/MOD goal did not reify"
+    unless parsed.atoms.size == 4 do
+      throwError "issue #67 regression: expected atoms a/b/q/r, got {parsed.atoms.size}"
+    st.restore
+  have hpos : 0 < b := Nat.pos_of_ne_zero hb
+  rw [Nat.mul_div_left _ hpos]
+
+-- TODO(#64): these now use shared DIV/MOD atoms, but still need the
+-- equality-elimination search pre-pass to close reliably.
 -- example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b = a := by sos
 -- example : ∀ n : ℕ, n / 2 + (n + 1) / 2 = n := by sos
 -- example : ∀ a b c : ℕ, c ≠ 0 → a / c + b / c ≤ (a + b) / c := by sos
--/
-
