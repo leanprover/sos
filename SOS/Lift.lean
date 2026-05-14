@@ -122,6 +122,12 @@ private structure DivModSite where
   num    : Expr       -- the dividend `a`
   denExpr : Expr      -- the divisor expression `b`
 
+/-- Local names used for the canonical quotient/remainder witnesses
+introduced for a DIV/MOD site. -/
+private structure DivModLocals where
+  q : Expr
+  r : Expr
+
 /-- Look up an existing `DivModSite` matching `(domain, num, denExpr)`.
 Compares both `num` and `denExpr` via `isDefEq` at reducible
 transparency. -/
@@ -188,31 +194,59 @@ partial def collectDivModSites (e : Expr) (acc : Array DivModSite := #[]) :
     | .mdata _ b => collectDivModSites b acc
     | _ => return acc
 
-/-- Introduce ℝ-typed witness hypotheses for one DIV/MOD site:
+/-- Introduce local quotient/remainder definitions for `site` and rewrite
+all ordinary hypotheses and the goal through those locals.
 
-  * `hdm : (↑a : ℝ) = ↑b * ↑(a / b) + ↑(a % b)`
-  * `hnn : (0 : ℝ) ≤ ↑(a % b)`
-  * `hgap : (0 : ℝ) ≤ ↑b - ↑(a % b) - 1`
+This is the single source of truth for a DIV/MOD site during a lift/refute
+pass: the generated witness hypotheses and the target/refute constraint both
+mention the same locals, so the reifier cannot split `a / b` and `a % b`
+occurrences into separate witness-side and goal-side atoms. -/
+private def localizeSite (site : DivModSite) : TacticM DivModLocals := withMainContext do
+  let aStx ← Elab.Term.exprToSyntax site.num
+  let bStx ← Elab.Term.exprToSyntax site.denExpr
+  let before := (← Lean.getLCtx).foldl (init := #[]) fun acc ldecl => acc.push ldecl.fvarId
+  match site.domain with
+  | .nat =>
+    evalTactic <| ← `(tactic| set sos_q : ℕ := ($aStx : ℕ) / ($bStx : ℕ) with _sos_hq)
+    evalTactic <| ← `(tactic| set sos_r : ℕ := ($aStx : ℕ) % ($bStx : ℕ) with _sos_hr)
+    evalTactic <| ← `(tactic| rw [← _sos_hq, ← _sos_hr] at *)
+    evalTactic <| ← `(tactic| clear _sos_hq _sos_hr)
+  | .int =>
+    evalTactic <| ← `(tactic| set sos_q : ℤ := ($aStx : ℤ) / ($bStx : ℤ) with _sos_hq)
+    evalTactic <| ← `(tactic| set sos_r : ℤ := ($aStx : ℤ) % ($bStx : ℤ) with _sos_hr)
+    evalTactic <| ← `(tactic| rw [← _sos_hq, ← _sos_hr] at *)
+    evalTactic <| ← `(tactic| clear _sos_hq _sos_hr)
+  | _ => throwError "localizeSite: unsupported DIV/MOD domain"
+  let lctx ← withMainContext Lean.getLCtx
+  let mut newDecls : Array LocalDecl := #[]
+  for ldecl in lctx do
+    if before.contains ldecl.fvarId then continue
+    unless (← domainOf? ldecl.type) = some site.domain do continue
+    newDecls := newDecls.push ldecl
+  let some qDecl := newDecls[0]? |
+    throwError "localizeSite: failed to introduce quotient local"
+  let some rDecl := newDecls[1]? |
+    throwError "localizeSite: failed to introduce remainder local"
+  return { q := mkFVar qDecl.fvarId, r := mkFVar rDecl.fvarId }
 
-The proofs route through the corresponding ℕ / ℤ lemma plus
-`push_cast` / `linarith`. The hypotheses are added in `0 ≤ …` form
-so `Reify.recogniseConstraint` picks them up directly.
+/-- Introduce ℝ-typed witness hypotheses for one localized DIV/MOD site:
 
-`hdm` (ℕ and ℤ) and ℕ's `hnn` are unconditional theorems and fail
-loudly if their proofs don't elaborate. The remaining facts — ℕ's
-`hgap`, both ℤ-side `hnn`/`hgap` — need divisor positivity, which
-routes through `by omega`; that side condition is wrapped in
-`first | have ... | skip` so a site whose divisor positivity can't
-be derived from the local context just loses the optional witness
-instead of aborting the lift. Sites with a positive literal divisor
-get all three witnesses (omega decides `0 < 7` trivially); sites
-with a non-literal divisor get the strict bound iff `b ≠ 0` /
-`0 < b` / etc. is already in scope. -/
-def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
+  * `hdm : (↑a : ℝ) = ↑b * ↑q + ↑r`
+  * `hnn : (0 : ℝ) ≤ ↑r`
+  * `hgap : (0 : ℝ) ≤ ↑b - ↑r - 1`
+
+The local quotient/remainder are definitionally `a / b` and `a % b`,
+but all visible constraints use the locals, matching the rewritten target. -/
+def enrichLocalizedSite (site : DivModSite) (locals : DivModLocals) : TacticM Unit :=
+    withMainContext do
   let a := site.num
   let b := site.denExpr
+  let q := locals.q
+  let r := locals.r
   let aStx ← Elab.Term.exprToSyntax a
   let bStx ← Elab.Term.exprToSyntax b
+  let qStx ← Elab.Term.exprToSyntax q
+  let rStx ← Elab.Term.exprToSyntax r
   -- The div/mod identity, remainder-nonneg, and remainder-bound lemmas
   -- differ between ℕ and ℤ. We synthesise the proof terms via `by`
   -- blocks rather than `mkAppM` so `push_cast` / `linarith` can do the
@@ -222,12 +256,12 @@ def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
     -- `Nat.div_add_mod` and `Nat.zero_le` are unconditional; failures
     -- here are bugs, not optional features, so we do not soft-fail.
     evalTactic <| ← `(tactic|
-      have _sos_hdm : (($aStx : ℕ) : ℝ) = (($bStx : ℕ) : ℝ) * ((($aStx : ℕ) / $bStx : ℕ) : ℝ)
-          + ((($aStx : ℕ) % $bStx : ℕ) : ℝ) :=
+      have _sos_hdm : (($aStx : ℕ) : ℝ) = (($bStx : ℕ) : ℝ) * (($qStx : ℕ) : ℝ)
+          + (($rStx : ℕ) : ℝ) :=
         by exact_mod_cast (Nat.div_add_mod ($aStx : ℕ) $bStx).symm)
     evalTactic <| ← `(tactic|
-      have _sos_hnn : (0 : ℝ) ≤ ((($aStx : ℕ) % $bStx : ℕ) : ℝ) :=
-        by exact_mod_cast Nat.zero_le (($aStx : ℕ) % $bStx))
+      have _sos_hnn : (0 : ℝ) ≤ (($rStx : ℕ) : ℝ) :=
+        by exact_mod_cast Nat.zero_le ($rStx : ℕ))
     -- `Nat.mod_lt` needs `0 < b`; route through `omega`, which decides
     -- positive literals trivially and pulls positivity from in-scope
     -- `b ≠ 0` / `0 < b` / `m < b` hypotheses for non-literal divisors.
@@ -235,7 +269,7 @@ def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
     -- loses this witness.
     evalTactic <| ← `(tactic|
       first
-        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℕ) : ℝ) - ((($aStx : ℕ) % $bStx : ℕ) : ℝ) - 1 := by
+        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℕ) : ℝ) - (($rStx : ℕ) : ℝ) - 1 := by
             have hpos : (0 : ℕ) < ($bStx : ℕ) := by omega
             have h : ($aStx : ℕ) % $bStx + 1 ≤ $bStx := Nat.mod_lt ($aStx : ℕ) hpos
             have h' : ((($aStx : ℕ) % $bStx + 1 : ℕ) : ℝ) ≤ ((($bStx : ℕ) : ℝ)) :=
@@ -247,21 +281,21 @@ def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
     -- `Int.emod_add_ediv` (via `Int.mul_ediv_add_emod`) is unconditional;
     -- failures here are bugs.
     evalTactic <| ← `(tactic|
-      have _sos_hdm : (($aStx : ℤ) : ℝ) = (($bStx : ℤ) : ℝ) * ((($aStx : ℤ) / $bStx : ℤ) : ℝ)
-          + ((($aStx : ℤ) % $bStx : ℤ) : ℝ) :=
+      have _sos_hdm : (($aStx : ℤ) : ℝ) = (($bStx : ℤ) : ℝ) * (($qStx : ℤ) : ℝ)
+          + (($rStx : ℤ) : ℝ) :=
         by exact_mod_cast (Int.mul_ediv_add_emod ($aStx : ℤ) $bStx).symm)
     -- `Int.emod_nonneg` needs `b ≠ 0`; `Int.emod_lt_of_pos` needs
     -- `0 < b`. Both flow through `omega`; both soft-fail.
     evalTactic <| ← `(tactic|
       first
-        | have _sos_hnn : (0 : ℝ) ≤ ((($aStx : ℤ) % $bStx : ℤ) : ℝ) := by
+        | have _sos_hnn : (0 : ℝ) ≤ (($rStx : ℤ) : ℝ) := by
             have hne : ($bStx : ℤ) ≠ 0 := by omega
             have h : (0 : ℤ) ≤ ($aStx : ℤ) % $bStx := Int.emod_nonneg _ hne
             exact_mod_cast h
         | skip)
     evalTactic <| ← `(tactic|
       first
-        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℤ) : ℝ) - ((($aStx : ℤ) % $bStx : ℤ) : ℝ) - 1 := by
+        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℤ) : ℝ) - (($rStx : ℤ) : ℝ) - 1 := by
             have hpos : (0 : ℤ) < ($bStx : ℤ) := by omega
             have h : ($aStx : ℤ) % $bStx + 1 ≤ $bStx :=
               Int.add_one_le_iff.mpr (Int.emod_lt_of_pos _ hpos)
@@ -273,7 +307,7 @@ def enrichSite (site : DivModSite) : TacticM Unit := withMainContext do
   | _ => pure ()
 
 /-- The shared user-name prefix for hypotheses introduced by
-`enrichSite`. Hypotheses whose user name starts with this string are
+`enrichLocalizedSite`. Hypotheses whose user name starts with this string are
 skipped during the local-context scan in `enrichDivMod`, so a
 recursive entry into `liftToReal` (e.g. after an `apply le_antisymm`
 split on an equality conclusion) doesn't re-enrich the same site by
@@ -289,9 +323,9 @@ private def isWitnessHyp (name : Name) : Bool :=
 every DIV/MOD site over ℕ/ℤ, and introduce witness hypotheses for
 each. The conditional witnesses (strict-bound, plus ℤ remainder-nonneg)
 are routed through `omega` on the divisor positivity and silently
-dropped when omega fails; see `enrichSite`.
+dropped when omega fails; see `enrichLocalizedSite`.
 
-Skips hypotheses already produced by a prior `enrichSite` (identified
+Skips hypotheses already produced by a prior `enrichLocalizedSite` (identified
 by `witnessNamePrefix`-prefixed user names) so this is idempotent
 under recursive calls. -/
 def enrichDivMod : TacticM Unit := withMainContext do
@@ -314,7 +348,8 @@ def enrichDivMod : TacticM Unit := withMainContext do
       sites ← collectDivModSites ty sites
   trace[sos.lift] "enrichDivMod: found {sites.size} DIV/MOD site(s)"
   for site in sites do
-    enrichSite site
+    let locals ← localizeSite site
+    enrichLocalizedSite site locals
 
 /-! ### Leading-binder intros
 

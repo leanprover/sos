@@ -218,8 +218,42 @@ codes 1/5 on these specific problems, so a numerical regulariser is
 not by itself sufficient — the symbolic elimination is the right
 solution.
 
+-/
+
+/-! ### Shared DIV/MOD quotient and remainder atoms (issue #67) -/
+
+open Lean Meta Elab Tactic in
+private partial def containsRawNatDivMod (e : Expr) : MetaM Bool := do
+  match_expr e with
+  | Nat.div _ _ => return true
+  | Nat.mod _ _ => return true
+  | _ =>
+    match e with
+    | .app f a => return (← containsRawNatDivMod f) || (← containsRawNatDivMod a)
+    | .lam _ t b _ | .forallE _ t b _ =>
+      return (← containsRawNatDivMod t) || (← containsRawNatDivMod b)
+    | .mdata _ b => containsRawNatDivMod b
+    | _ => return false
+
+set_option linter.unusedTactic false in
+example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b ≤ a := by
+  intro a b hb
+  run_tac do
+    let st ← Lean.Elab.Tactic.saveState
+    SOS.Lift.refuteToReal
+    let some parsed ← SOS.Reify.parseGoalAtomic |
+      throwError "issue #67 regression: refuted DIV/MOD goal did not reify"
+    unless parsed.atoms.size == 4 do
+      throwError "issue #67 regression: expected atoms a/b/q/r, got {parsed.atoms.size}"
+    for atom in parsed.atoms do
+      if ← containsRawNatDivMod atom then
+        throwError "issue #67 regression: raw Nat.div/Nat.mod leaked into atom {atom}"
+    st.restore
+  have hpos : 0 < b := Nat.pos_of_ne_zero hb
+  rw [Nat.mul_div_left _ hpos]
+
+-- TODO(#64): these now use shared DIV/MOD atoms, but still need the
+-- equality-elimination search pre-pass to close reliably.
 -- example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b = a := by sos
 -- example : ∀ n : ℕ, n / 2 + (n + 1) / 2 = n := by sos
 -- example : ∀ a b c : ℕ, c ≠ 0 → a / c + b / c ≤ (a + b) / c := by sos
--/
-
