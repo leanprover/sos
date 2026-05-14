@@ -53,11 +53,11 @@ structure Config where
   monoid. `1` is pure Putinar (one σᵢ per constraint, no products); higher
   values let the search use products of constraint polynomials. The search
   always tries Putinar (cardinality 1) first; if that fails it falls back
-  to `maxSubsetCardinality`. The default cap is high enough to cover all
-  Harrison preordering targets; lower it for batch/performance-critical
-  pipelines where interval-Schur-style targets with many constraints can
-  produce up to `2^k − 1` product blocks. -/
-  maxSubsetCardinality : Nat := 6
+  to `maxSubsetCardinality`. The default cap covers the current regression
+  suite without the combinatorial cost of larger product caps; raise it
+  explicitly for interval-Schur-style targets where products of three or
+  more constraints are expected. -/
+  maxSubsetCardinality : Nat := 2
   deriving Inhabited
 
 /-- Elaborator for `(config := …)` clauses on `sos`/`sos?`. -/

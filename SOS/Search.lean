@@ -36,6 +36,7 @@ closed, `-1` for infeasibility) over constraints `{gᵢ ≥ 0}` (with
   certificate exactly via `Certificate.checks`.
 -/
 import SOS.Certificate
+import SOS.EqElim
 import SOS.LDL
 import SOS.RatLinAlg
 import SOS.RatSimplex
@@ -1131,6 +1132,52 @@ private def tryReducedPureSdp (target : CMvPolynomial n ℚ) (goal : Goal n)
         return some cert
   return none
 
+private def constSOSDecomp? (r : ℚ) : Option (SOSDecomp n) := do
+  let roots ← LDL.fourSquaresRat r
+  return { squares := roots.map fun c => CMvPolynomial.C c }
+
+/-- Exact rational fast path for certificates with constant SOS
+multipliers over the enumerated Schmüdgen products. This catches the
+small div/mod refutations after equality elimination without asking CSDP
+to recover a rank-zero/constant Gram solution numerically. -/
+private def tryConstantProductCertificate (target : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
+    (goal : Goal n) (extraDeg : Nat) (maxSubsetCardinality : Nat) :
+    Option (Certificate n) := Id.run do
+  if !ps.isEmpty then return none
+  let targetDeg := target.totalDegree
+  let maxGDeg := gs.foldl (fun acc g => Nat.max acc g.totalDegree) 0
+  let σ₀Deg := Nat.max targetDeg maxGDeg
+  let products : Array (List Nat × CMvPolynomial n ℚ) :=
+    #[([], CMvPolynomial.C 1)] ++
+      enumerateConstraintProducts (σ₀Deg + 2 * extraDeg)
+        maxSubsetCardinality gs.toArray
+  let mut monos : Array (CMvMonomial n) := target.monomials.toArray
+  for (_, prod) in products do
+    for m in prod.monomials do
+      if !monos.contains m then
+        monos := monos.push m
+  let mut A : Array (Array ℚ) := Array.mkEmpty monos.size
+  let mut b : Array ℚ := Array.mkEmpty monos.size
+  for m in monos do
+    let mut row : Array ℚ := Array.mkEmpty products.size
+    for (_, prod) in products do
+      row := row.push (prod.coeff m)
+    A := A.push row
+    b := b.push (target.coeff m)
+  let some sol := RatSimplex.findFeasibleEqLP? A b | return none
+  let mut sigmas : Array (List Nat × SOSDecomp n) := #[]
+  for i in [0:products.size] do
+    let μ := sol.getD i 0
+    if μ != 0 then
+      let some sigma := constSOSDecomp? (n := n) μ | return none
+      let product := products.getD i ([], 0)
+      sigmas := sigmas.push (product.1, sigma)
+  let cert : Certificate n := { sigmas := sigmas.toList, eqCofs := [] }
+  if cert.checks goal gs ps then
+    return some cert
+  return none
+
 /-- Try a single SDP encoding (one choice of `useTraceCost` and one
 `extraDeg` relaxation level) and the denominator schedule. Candidates
 are filtered against `maxRoundingDenom` (default `2^20`); raise it via
@@ -1209,7 +1256,7 @@ is `(maxDepth+1) × strategies` CSDP solves. Opt in per call via
 
 `maxRoundingDenom` caps the denominator schedule (default `2^20`).
 Same config struct on the tactic side. -/
-def runFeasibilitySearch (target : CMvPolynomial n ℚ)
+private def runFeasibilitySearchCore (target : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
     (goal : Goal n) (maxRoundingDenom : Nat := 1048576)
     (maxDepth : Nat := 0) (basisStrategy : BasisStrategy := .newton)
@@ -1265,6 +1312,9 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
     else [putinarCap, fullCap]
   for extraDeg in [0:maxDepth + 1] do
     for maxCard in cardinalitySchedule do
+      if let some cert := tryConstantProductCertificate target gs ps goal
+          extraDeg maxCard then
+        return some cert
       let basisDeg := halfCeil σ₀Deg + extraDeg
       let fullBasisSize := (monomialsUpTo n basisDeg).size
       -- Sparsity gate (`4·|support| < C(n+D, D)`): for visibly dense
@@ -1295,6 +1345,29 @@ def runFeasibilitySearch (target : CMvPolynomial n ℚ)
                 strat maxRoundingDenom maxCard then
               return some cert
   return none
+
+/-- Closed-positivity / infeasibility search with an equality-elimination
+pre-pass. When an equality can solve for a variable, the SDP is run on the
+substituted system and the resulting certificate is lifted back over the
+original equality list before returning. -/
+def runFeasibilitySearch (target : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ))
+    (goal : Goal n) (maxRoundingDenom : Nat := 1048576)
+    (maxDepth : Nat := 0) (basisStrategy : BasisStrategy := .newton)
+    (maxSubsetCardinality : Nat := 1) :
+    IO (Option (Certificate n)) := do
+  if let some (elimGoal, gs', ps', map) :=
+      SOS.EqElim.eliminateEqualities goal gs ps then
+    if ps'.length < ps.length then
+      match (← runFeasibilitySearchCore elimGoal.target gs' ps' elimGoal
+          maxRoundingDenom maxDepth basisStrategy maxSubsetCardinality) with
+      | some cert =>
+          let cert := SOS.EqElim.reconstructCertificate map cert
+          if cert.checks goal gs ps then
+            return some cert
+      | none => pure ()
+  runFeasibilitySearchCore target gs ps goal maxRoundingDenom maxDepth
+    basisStrategy maxSubsetCardinality
 
 /-! ### Strict positivity via LP-slack maximisation
 
@@ -1420,7 +1493,7 @@ on `λ*` accounts for CSDP imprecision — when `λ*` is reported just
 below a clean power of two, we still try the natural largest `ε`.
 Returns `none` if CSDP fails, `λ* ≤ 1e-9`, or no candidate ε in the
 window admits a verifiable certificate. -/
-def runStrict (p : CMvPolynomial n ℚ)
+private def runStrictCore (p : CMvPolynomial n ℚ)
     (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
     (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
     (basisStrategy : BasisStrategy := .newton)
@@ -1485,6 +1558,27 @@ def runStrict (p : CMvPolynomial n ℚ)
         | some cert => return some { cert, ε, hε }
         | none => pure ()
   return none
+
+/-- Strict-positivity search with equality elimination before both the LP-slack
+probe and the final feasibility reconstruction. -/
+def runStrict (p : CMvPolynomial n ℚ)
+    (gs : List (CMvPolynomial n ℚ)) (ps : List (CMvPolynomial n ℚ) := [])
+    (maxRoundingDenom : Nat := 1048576) (maxDepth : Nat := 0)
+    (basisStrategy : BasisStrategy := .newton)
+    (maxSubsetCardinality : Nat := 1) :
+    IO (Option (StrictResult n)) := do
+  if let some (elimGoal, gs', ps', map) :=
+      SOS.EqElim.eliminateEqualities (.closed p) gs ps then
+    if ps'.length < ps.length then
+      match (← runStrictCore elimGoal.target gs' ps' maxRoundingDenom maxDepth
+          basisStrategy maxSubsetCardinality) with
+      | some res =>
+          let cert := SOS.EqElim.reconstructCertificate map res.cert
+          let goal : Goal n := .strict p res.ε res.hε
+          if cert.checks goal gs ps then
+            return some { res with cert := cert }
+      | none => pure ()
+  runStrictCore p gs ps maxRoundingDenom maxDepth basisStrategy maxSubsetCardinality
 
 /-! ### Strict positivity via strict-product Positivstellensatz
 

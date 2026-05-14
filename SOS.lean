@@ -9,6 +9,7 @@ import SOS.LDL
 import SOS.RatSimplex
 import SOS.RatLinAlg
 import SOS.Symmetry
+import SOS.EqElim
 import SOS.Search
 import SOS.Reify
 import SOS.Lift

@@ -258,6 +258,10 @@ example (x : ℝ) (_h : 0 < x) : 0 < x^2 := by
 #guard_msgs in
 example (x y : ℝ) (_h : x*y = 1) : 0 ≤ x*y - 1 := by sos?
 
+-- Equality-elimination reconstruction with a two-step substitution chain.
+example (x y : ℝ) (_hxy : x - y = 0) (_hy : y - 1 = 0) : 0 ≤ x - 1 := by
+  sos
+
 /-! ### `sos_witness` direct use
 
 The witness elaborator also accepts certificates for constrained and
