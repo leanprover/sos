@@ -269,7 +269,7 @@ def enrichLocalizedSite (site : DivModSite) (locals : DivModLocals) : TacticM Un
     -- loses this witness.
     evalTactic <| ← `(tactic|
       first
-        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℕ) : ℝ) - ((($aStx : ℕ) % $bStx : ℕ) : ℝ) - 1 := by
+        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℕ) : ℝ) - (($rStx : ℕ) : ℝ) - 1 := by
             have hpos : (0 : ℕ) < ($bStx : ℕ) := by omega
             have h : ($aStx : ℕ) % $bStx + 1 ≤ $bStx := Nat.mod_lt ($aStx : ℕ) hpos
             have h' : ((($aStx : ℕ) % $bStx + 1 : ℕ) : ℝ) ≤ ((($bStx : ℕ) : ℝ)) :=
@@ -277,8 +277,6 @@ def enrichLocalizedSite (site : DivModSite) (locals : DivModLocals) : TacticM Un
             push_cast at h' ⊢
             linarith
         | skip)
-    evalTactic <| ← `(tactic|
-      try rw [← show ($rStx : ℕ) = ($aStx : ℕ) % ($bStx : ℕ) from rfl] at _sos_hgap)
   | .int =>
     -- `Int.emod_add_ediv` (via `Int.mul_ediv_add_emod`) is unconditional;
     -- failures here are bugs.
@@ -297,7 +295,7 @@ def enrichLocalizedSite (site : DivModSite) (locals : DivModLocals) : TacticM Un
         | skip)
     evalTactic <| ← `(tactic|
       first
-        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℤ) : ℝ) - ((($aStx : ℤ) % $bStx : ℤ) : ℝ) - 1 := by
+        | have _sos_hgap : (0 : ℝ) ≤ (($bStx : ℤ) : ℝ) - (($rStx : ℤ) : ℝ) - 1 := by
             have hpos : (0 : ℤ) < ($bStx : ℤ) := by omega
             have h : ($aStx : ℤ) % $bStx + 1 ≤ $bStx :=
               Int.add_one_le_iff.mpr (Int.emod_lt_of_pos _ hpos)
@@ -306,8 +304,6 @@ def enrichLocalizedSite (site : DivModSite) (locals : DivModLocals) : TacticM Un
             push_cast at h' ⊢
             linarith
         | skip)
-    evalTactic <| ← `(tactic|
-      try rw [← show ($rStx : ℤ) = ($aStx : ℤ) % ($bStx : ℤ) from rfl] at _sos_hgap)
   | _ => pure ()
 
 /-- The shared user-name prefix for hypotheses introduced by

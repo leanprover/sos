@@ -222,6 +222,19 @@ solution.
 
 /-! ### Shared DIV/MOD quotient and remainder atoms (issue #67) -/
 
+open Lean Meta Elab Tactic in
+private partial def containsRawNatDivMod (e : Expr) : MetaM Bool := do
+  match_expr e with
+  | Nat.div _ _ => return true
+  | Nat.mod _ _ => return true
+  | _ =>
+    match e with
+    | .app f a => return (← containsRawNatDivMod f) || (← containsRawNatDivMod a)
+    | .lam _ t b _ | .forallE _ t b _ =>
+      return (← containsRawNatDivMod t) || (← containsRawNatDivMod b)
+    | .mdata _ b => containsRawNatDivMod b
+    | _ => return false
+
 set_option linter.unusedTactic false in
 example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b ≤ a := by
   intro a b hb
@@ -232,6 +245,9 @@ example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b ≤ a := by
       throwError "issue #67 regression: refuted DIV/MOD goal did not reify"
     unless parsed.atoms.size == 4 do
       throwError "issue #67 regression: expected atoms a/b/q/r, got {parsed.atoms.size}"
+    for atom in parsed.atoms do
+      if ← containsRawNatDivMod atom then
+        throwError "issue #67 regression: raw Nat.div/Nat.mod leaked into atom {atom}"
     st.restore
   have hpos : 0 < b := Nat.pos_of_ne_zero hb
   rw [Nat.mul_div_left _ hpos]
