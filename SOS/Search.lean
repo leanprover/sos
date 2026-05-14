@@ -631,34 +631,22 @@ def buildSdp (target : CMvPolynomial n ℚ) (gs : List (CMvPolynomial n ℚ))
 
 /-! ### Denominator schedule for rational rounding -/
 
-/-- Schedule of denominators tried by the rational rounder, adapted from
-`sos.ml`'s `find_rounding`. First a dense small-integer region
-(`[1..63]`), then powers of two interleaved with their 1.5× scalings
-(`64, 96, 128, 192, 256, 384, …, 2^20`).
+/-- Schedule of denominators tried by the rational rounder, lifted
+directly from `sos.ml`'s `find_rounding`: `[1..31]` followed by `2^k`
+for `k = 5..66`.
 
 Harrison reports that "small ints first, then doubling" works
-empirically better than a strict doubling schedule — the densified
-small region and 1.5× interleaves catch Gram denominators that the
-old `[1..31] ++ [2^5..2^20]` schedule missed.
+empirically better than a strict doubling schedule.
 
-Harrison's HOL Light caps at `2^66`; we cap at `2^24`. Beyond that
-range, CSDP rounding noise produces tiny positive `LDL` pivots whose
-`fourSquaresRat` decomposition is `O(√num · denom)` and exceeds
-practical wall time. The `maxRoundingDenom` field of `SOS.Config` (see
-`SOS/Tactic.lean`) filters the *full* candidate list — schedule entries,
-`polyDenom target`, constraint denoms, and cross denoms — against the
-cap. Targets needing a strictly larger denom fall through to
+The `maxRoundingDenom` field of `SOS.Config` (see `SOS/Tactic.lean`)
+filters the *full* candidate list — schedule entries, `polyDenom
+target`, constraint denoms, and cross denoms — against the cap.
+Targets needing a strictly larger denom fall through to
 `sos_witness <hand-cert>`. -/
 def niceDenominators : List ℚ :=
-  let smalls : List ℚ := (List.range 63).map (fun i => (i + 1 : ℚ))
-  -- For k = 6..23, alternate `2^k` and `3·2^(k-1) = 1.5·2^k`; then `2^24`.
-  -- The extended range (past `2^20`) gives the Schmüdgen preordering
-  -- room for product-block Grams whose denominator grows with subset
-  -- cardinality (issue #38).
+  let smalls : List ℚ := (List.range 31).map (fun i => (i + 1 : ℚ))
   let bigs : List ℚ :=
-    (List.range 18).flatMap
-        (fun i => [(2 ^ (i + 6) : ℚ), ((3 : ℚ) * 2 ^ (i + 5))])
-      ++ [(2 ^ 24 : ℚ)]
+    (List.range 62).map (fun i => (2 ^ (i + 5) : ℚ))
   smalls ++ bigs
 
 /-- Round a single float to the nearest rational at denominator `d`,

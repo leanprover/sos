@@ -13,23 +13,17 @@ import SOS
 
 open SOS CPoly
 
-/-! ### Rounding-denominator schedule (#15, extended in #38)
+/-! ### Rounding-denominator schedule
 
-The denser schedule is `[1..63]` followed by alternating `2^k`,
-`3·2^(k-1)` for `k = 6..23`, then `2^24`. Issue #38 extended the upper
-end past `2^20` to give Schmüdgen product-block Grams more rounding
-headroom. -/
+The schedule is `[1..31]` followed by `2^k` for `k = 5..66`, matching
+`sos.ml`'s `find_rounding`. -/
 
-#guard SOS.Search.niceDenominators.length = 63 + 18 * 2 + 1
-#guard (SOS.Search.niceDenominators.take 63) =
-    ((List.range 63).map (fun i => (i + 1 : ℚ)))
-#guard (SOS.Search.niceDenominators.drop 63).take 6 =
-    [(64 : ℚ), 96, 128, 192, 256, 384]
-#guard SOS.Search.niceDenominators.getLast? = some (16777216 : ℚ)
-
--- Densified region was absent from the old `[1..31] ++ [2^5..2^20]`.
-#guard SOS.Search.niceDenominators.contains (45 : ℚ)
-#guard SOS.Search.niceDenominators.contains (96 : ℚ)
+#guard SOS.Search.niceDenominators.length = 31 + 62
+#guard (SOS.Search.niceDenominators.take 31) =
+    ((List.range 31).map (fun i => (i + 1 : ℚ)))
+#guard (SOS.Search.niceDenominators.drop 31).take 4 =
+    [(32 : ℚ), 64, 128, 256]
+#guard SOS.Search.niceDenominators.getLast? = some ((2 ^ 66 : Nat) : ℚ)
 
 /-! ### Exact rational row reduction -/
 
