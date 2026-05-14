@@ -252,8 +252,11 @@ example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b ≤ a := by
   have hpos : 0 < b := Nat.pos_of_ne_zero hb
   rw [Nat.mul_div_left _ hpos]
 
--- TODO(#64): these now use shared DIV/MOD atoms, but still need the
--- equality-elimination search pre-pass to close reliably.
--- example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b = a := by sos
--- example : ∀ n : ℕ, n / 2 + (n + 1) / 2 = n := by sos
--- example : ∀ a b c : ℕ, c ≠ 0 → a / c + b / c ≤ (a + b) / c := by sos
+example : ∀ a b : ℕ, b ≠ 0 → (a * b) / b = a := by
+  sos (config := { maxDepth := 0, maxSubsetCardinality := 2 })
+
+example : ∀ n : ℕ, n / 2 + (n + 1) / 2 = n := by
+  sos (config := { maxDepth := 0, maxSubsetCardinality := 2 })
+
+example : ∀ a b c : ℕ, c ≠ 0 → a / c + b / c ≤ (a + b) / c := by
+  sos (config := { maxDepth := 0, maxSubsetCardinality := 2 })
