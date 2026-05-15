@@ -31,6 +31,23 @@ headroom. -/
 #guard SOS.Search.niceDenominators.contains (45 : ℚ)
 #guard SOS.Search.niceDenominators.contains (96 : ℚ)
 
+/-! ### `niceRound` regression: large-denominator precision
+
+Before the hybrid `niceRound`, the pure-`Float` path used
+`Float.toUInt64` on `x * d + 0.5`, which saturates at `2^64 - 1`.
+For denominators above roughly `2^53` this silently produced
+nonsense rationals (e.g. `niceRound (2^66) 1.0 = (2^64-1)/2^66 ≈
+1/4` instead of `1`). The exact-path fallback fixes this. -/
+
+#guard SOS.Search.niceRound ((2 ^ 66 : Nat) : ℚ) 1.0 = 1
+#guard SOS.Search.niceRound ((2 ^ 66 : Nat) : ℚ) 0.5 = 1 / 2
+#guard SOS.Search.niceRound ((2 ^ 60 : Nat) : ℚ) (-1.0) = -1
+#guard SOS.Search.niceRound ((2 ^ 49 : Nat) : ℚ) 1.0 = 1
+-- Fast Float path still correct on schedule entries.
+#guard SOS.Search.niceRound ((2 ^ 24 : Nat) : ℚ) 1.0 = 1
+#guard SOS.Search.niceRound ((3 : ℚ)) 0.5 = 2 / 3
+#guard SOS.Search.niceRound ((3 : ℚ)) (-0.5) = -2 / 3
+
 /-! ### Exact rational row reduction -/
 
 #guard
