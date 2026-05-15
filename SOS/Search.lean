@@ -662,14 +662,63 @@ def niceDenominators : List ℚ :=
       ++ [(2 ^ 24 : ℚ)]
   smalls ++ bigs
 
+/-- Exact rational value of a finite, non-NaN `Float`. Decomposes `x`
+as `s * 2^i` with `s ∈ [0.5, 1)` (via `frExp`), then multiplies the
+significand by `2^53` so the mantissa becomes an exact integer below
+`2^53` (within `Float.toUInt64`'s safe range). The result is a `ℚ`
+that equals `x` exactly. Returns `0` on non-finite input — callers
+should not feed NaN/Inf, but a defensive default keeps the rounder
+total. -/
+private def floatToRatExact (x : Float) : ℚ :=
+  if !x.isFinite then 0
+  else if x == 0.0 then 0
+  else
+    let absx : Float := if x < 0 then -x else x
+    let (s, i) := absx.frExp
+    -- `s.scaleB 53 = s * 2^53`. Since `|s| < 1`, this is an exact
+    -- integer of absolute value `< 2^53`, well within `UInt64`.
+    let mantissa : Nat := (s.scaleB 53).toUInt64.toNat
+    let e : Int := i - 53
+    let absRat : ℚ :=
+      if e ≥ 0 then (mantissa : ℚ) * ((2 : ℚ) ^ e.toNat)
+      else (mantissa : ℚ) / ((2 : ℚ) ^ (-e).toNat)
+    if x < 0 then -absRat else absRat
+
+/-- Round-half-away-from-zero on a rational, returning the nearest
+integer. For `q = num/den` with `den > 0`, `|⌊|q| + 1/2⌋ = (2·|num| +
+den) / (2·den)` (floor division on positive arguments). -/
+private def roundHalfAwayFromZero (q : ℚ) : Int :=
+  let absNum : Nat := q.num.natAbs
+  let den : Nat := q.den
+  let absRound : Nat := (2 * absNum + den) / (2 * den)
+  if q.num < 0 then -(absRound : Int) else (absRound : Int)
+
 /-- Round a single float to the nearest rational at denominator `d`,
-using round-half-away-from-zero on the numerator. -/
+using round-half-away-from-zero on the numerator.
+
+Hybrid implementation: when `d` is an integer well within `Float`'s
+53-bit mantissa, falls back to the fast `Float`-arithmetic path (the
+common case — `niceDenominators` entries up to `2^48` and the
+typical bounded CSDP Gram entries all land here). For larger `d`,
+switches to exact rational arithmetic via `floatToRatExact` to avoid
+the silent `Float.toUInt64` saturation that the fast path suffers
+above `2^64`. -/
 def niceRound (d : ℚ) (x : Float) : ℚ :=
-  let dFloat : Float := ratToFloat d
-  let nSigned : Int :=
-    if x < 0 then -(((-x) * dFloat + 0.5).toUInt64.toNat : Int)
-    else (x * dFloat + 0.5).toUInt64.toNat
-  (nSigned : ℚ) / d
+  if d.den == 1 && d.num.natAbs ≤ (1 <<< 48 : Nat) then
+    -- Fast Float path: `x * d` fits in `Float`'s mantissa for any
+    -- CSDP-bounded `x` with several bits of headroom, and the
+    -- `Float.toUInt64` conversion stays well below saturation.
+    let dFloat : Float := ratToFloat d
+    let nSigned : Int :=
+      if x < 0 then -(((-x) * dFloat + 0.5).toUInt64.toNat : Int)
+      else (x * dFloat + 0.5).toUInt64.toNat
+    (nSigned : ℚ) / d
+  else
+    -- Exact rational path. Slower (Rat multiplication at ~`2^53`
+    -- denominators) but correct for arbitrarily large `d`.
+    let xRat : ℚ := floatToRatExact x
+    let n : Int := roundHalfAwayFromZero (xRat * d)
+    (n : ℚ) / d
 
 /-! ### Decoding `Solution.X` -/
 
