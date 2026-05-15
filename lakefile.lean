@@ -34,7 +34,7 @@ package sos where
   leanOptions := #[⟨`autoImplicit, false⟩]
 
 require CSDP from git
-  "https://github.com/kim-em/csdp-ffi" @ "main"
+  "https://github.com/leanprover/csdp-ffi" @ "main"
 
 require «CompPoly» from git
   "https://github.com/Verified-zkEVM/CompPoly" @ "master"
