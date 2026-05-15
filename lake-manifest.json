@@ -11,7 +11,7 @@
    "inputRev": "master",
    "inherited": false,
    "configFile": "lakefile.lean"},
-  {"url": "https://github.com/kim-em/csdp-ffi",
+  {"url": "https://github.com/leanprover/csdp-ffi",
    "type": "git",
    "subDir": null,
    "scope": "",

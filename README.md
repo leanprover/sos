@@ -1,10 +1,31 @@
 # sos
 
-[![CI](https://github.com/kim-em/sos/actions/workflows/ci.yml/badge.svg)](https://github.com/kim-em/sos/actions/workflows/ci.yml)
+[![CI](https://github.com/leanprover/sos/actions/workflows/ci.yml/badge.svg)](https://github.com/leanprover/sos/actions/workflows/ci.yml)
 
 Harrison's sum-of-squares decision procedure for nonlinear real
 arithmetic, in Lean 4. Based on the design from
 [Harrison 2007 (TPHOLs)](https://link.springer.com/chapter/10.1007/978-3-540-74591-4_9).
+
+## Adding to your project
+
+Add the following to your `lakefile.toml`:
+
+```toml
+[[require]]
+name = "sos"
+git = "https://github.com/leanprover/sos.git"
+rev = "main"
+```
+
+Or, in a `lakefile.lean`:
+
+```lean
+require sos from git
+  "https://github.com/leanprover/sos.git" @ "main"
+```
+
+Then `import SOS` and use `by sos`. The system BLAS/LAPACK runtime must
+be installed; see [Native dependency troubleshooting](#native-dependency-troubleshooting).
 
 ## Status
 
@@ -166,7 +187,7 @@ This repository is pinned to the Lean version in
 [`lake-manifest.json`](lake-manifest.json).
 
 ```
-git clone https://github.com/kim-em/sos
+git clone https://github.com/leanprover/sos
 cd sos
 lake exe cache get
 lake test
@@ -227,7 +248,7 @@ The tactic runs three stages on a `by sos` goal:
 |---|---|
 | [`leanprover-community/mathlib4`](https://github.com/leanprover-community/mathlib4) | `IsSumSq.nonneg`, `ℝ`, `algebraMap ℚ ℝ`, `ring`, `push_cast`. |
 | [`Verified-zkEVM/CompPoly`](https://github.com/Verified-zkEVM/CompPoly) | Computational `CMvPolynomial n R` substrate; sorry/axiom-free. |
-| [`kim-em/csdp-ffi`](https://github.com/kim-em/csdp-ffi) | FFI wrapper around CSDP 6.2.0. Vendored CSDP source. |
+| [`leanprover/csdp-ffi`](https://github.com/leanprover/csdp-ffi) | FFI wrapper around CSDP 6.2.0. Vendored CSDP source. |
 
 System dependencies (BLAS/LAPACK, transitively via csdp-ffi):
 
